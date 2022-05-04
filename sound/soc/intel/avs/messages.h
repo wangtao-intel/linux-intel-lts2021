@@ -411,6 +411,11 @@ struct avs_fw_version {
 	u16 build;
 };
 
+enum avs_sched_systick_source {
+	AVS_SCHED_SYSTICK_LP_TIMER = 1,
+	AVS_SCHED_SYSTICK_DMA_GATEWAY = 2,
+};
+
 enum avs_fw_cfg_params {
 	AVS_FW_CFG_FW_VERSION = 0,
 	AVS_FW_CFG_MEMORY_RECLAIMED,
@@ -461,6 +466,7 @@ struct avs_fw_cfg {
 };
 
 int avs_ipc_get_fw_config(struct avs_dev *adev, struct avs_fw_cfg *cfg);
+int avs_ipc_set_fw_config(struct avs_dev *adev, size_t num_tlvs, ...);
 
 enum avs_hw_cfg_params {
 	AVS_HW_CFG_AVS_VER,
@@ -733,6 +739,18 @@ union avs_connector_node_id {
 		u32 rsvd:19;
 	};
 } __packed;
+
+struct avs_fw_sched_cfg {
+	u32 systick_multiplier;
+	u32 systick_divider;
+	u32 systick_source;
+	u32 systick_cfg_len;
+	union {
+		DECLARE_FLEX_ARRAY(u32, systick_cfg);
+		union avs_connector_node_id node_id;
+	};
+} __packed;
+static_assert(sizeof(struct avs_fw_sched_cfg) == 20);
 
 #define INVALID_PIPELINE_ID	0xFF
 #define INVALID_NODE_ID \
