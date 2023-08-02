@@ -531,6 +531,7 @@ static void avs_pci_remove(struct pci_dev *pci)
 	pci_free_irq(pci, 0, adev);
 	pci_free_irq(pci, 0, bus);
 	pci_free_irq_vectors(pci);
+	kfree(adev->sched_cfg);
 	iounmap(bus->remap_addr);
 	iounmap(adev->dsp_ba);
 	pci_release_regions(pci);

@@ -129,6 +129,7 @@ struct avs_dev {
 	struct avs_ipc *ipc;
 
 	struct avs_fw_cfg fw_cfg;
+	struct avs_fw_sched_cfg *sched_cfg;
 	struct avs_hw_cfg hw_cfg;
 	struct avs_mods_info *mods_info;
 	struct ida **mod_idas;
@@ -436,6 +437,8 @@ static inline int avs_probe_platform_register(struct avs_dev *adev, const char *
 static inline void avs_debugfs_init(struct avs_dev *adev) { }
 static inline void avs_debugfs_exit(struct avs_dev *adev) { }
 #endif
+
+int avs_parse_sched_cfg(struct avs_dev *adev, const char *buf, size_t len);
 
 /* Filesystems integration */
 
