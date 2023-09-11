@@ -227,6 +227,12 @@ config SND_SOC_INTEL_AVS
 	  capabilities. This includes Skylake, Kabylake, Amberlake and
 	  Apollolake.
 
+config SND_SOC_INTEL_AVS_SCHED_CFG
+	string "Scheduler config"
+	depends on EXPERT && SND_SOC_INTEL_AVS
+	help
+	  Sets scheduler config to provided value after FW boot.
+
 # Machine board drivers
 source "sound/soc/intel/avs/boards/Kconfig"
 

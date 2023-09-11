@@ -399,6 +399,15 @@ static int avs_bus_init(struct avs_dev *adev, struct pci_dev *pci, const struct 
 	mutex_init(&adev->comp_list_mutex);
 	mutex_init(&adev->path_mutex);
 
+#if defined(CONFIG_SND_SOC_INTEL_AVS_SCHED_CFG)
+	if (CONFIG_SND_SOC_INTEL_AVS_SCHED_CFG[0] != '\0') {
+		ret = avs_parse_sched_cfg(adev, CONFIG_SND_SOC_INTEL_AVS_SCHED_CFG,
+					  strlen(CONFIG_SND_SOC_INTEL_AVS_SCHED_CFG));
+		if (ret < 0)
+			return ret;
+	}
+#endif
+
 	return 0;
 }
 
