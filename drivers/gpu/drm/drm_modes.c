@@ -1329,6 +1329,9 @@ void drm_mode_prune_invalid(struct drm_device *dev,
 
 	list_for_each_entry_safe(mode, t, mode_list, head) {
 		if (mode->status != MODE_OK) {
+			/* Skip one specific resolution for EF1E-A1 panel */
+			if ((mode->hdisplay == 2880) && (mode->vdisplay == 1620))
+				continue;
 			list_del(&mode->head);
 			if (mode->type & DRM_MODE_TYPE_USERDEF) {
 				drm_warn(dev, "User-defined mode not supported: "
