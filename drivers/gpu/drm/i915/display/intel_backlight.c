@@ -947,6 +947,11 @@ int intel_backlight_device_register(struct intel_connector *connector)
 	const char *name;
 	int ret = 0;
 
+	drm_dbg_kms(&i915->drm,
+		    "[CONNECTOR:%d:%s] backlight device %s panel->backlight.present =%d\n",
+		    connector->base.base.id, connector->base.name, name,
+		    panel->backlight.present);
+
 	if (WARN_ON(panel->backlight.device))
 		return -ENODEV;
 
@@ -955,9 +960,11 @@ int intel_backlight_device_register(struct intel_connector *connector)
 
 	WARN_ON(panel->backlight.max == 0);
 
-	if (!acpi_video_backlight_use_native()) {
-		drm_info(&i915->drm, "Skipping intel_backlight registration\n");
-		return 0;
+	if (strcmp(connector->base.name ,"DP-3") != 0) {
+		if (!acpi_video_backlight_use_native()) {
+			drm_info(&i915->drm, "Skipping intel_backlight registration\n");
+			return 0;
+		}
 	}
 
 	memset(&props, 0, sizeof(props));
@@ -1619,7 +1626,9 @@ int intel_backlight_setup(struct intel_connector *connector, enum pipe pipe)
 		} else {
 			drm_dbg_kms(&dev_priv->drm,
 				    "no backlight present per VBT\n");
-			return 0;
+
+			if (strcmp(connector->base.name ,"DP-3") != 0)
+				return 0;
 		}
 	}
 
@@ -1788,6 +1797,9 @@ void intel_backlight_init_funcs(struct intel_panel *panel)
 		if (!intel_has_quirk(dev_priv, QUIRK_NO_PPS_BACKLIGHT_POWER_HOOK))
 			connector->panel.backlight.power = intel_pps_backlight_power;
 	}
+
+	if (intel_dp_mcu_init_backlight_funcs(connector) == 0)
+		return;
 
 	/* We're using a standard PWM backlight interface */
 	panel->backlight.funcs = &pwm_bl_funcs;

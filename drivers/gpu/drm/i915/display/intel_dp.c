@@ -115,6 +115,13 @@ bool intel_dp_is_edp(struct intel_dp *intel_dp)
 	return dig_port->base.type == INTEL_OUTPUT_EDP;
 }
 
+bool intel_dp_is_dp(struct intel_dp *intel_dp)
+{
+	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
+
+	return dig_port->base.type == INTEL_OUTPUT_DP;
+}
+
 static void intel_dp_unset_edid(struct intel_dp *intel_dp);
 static int intel_dp_dsc_compute_bpp(struct intel_dp *intel_dp, u8 dsc_max_bpc);
 
@@ -2141,6 +2148,12 @@ void intel_edp_backlight_on(const struct intel_crtc_state *crtc_state,
 	struct intel_dp *intel_dp = enc_to_intel_dp(to_intel_encoder(conn_state->best_encoder));
 	struct drm_i915_private *i915 = dp_to_i915(intel_dp);
 
+	if (intel_dp_is_dp(intel_dp)) {
+		drm_dbg_kms(&i915->drm, "\n");
+		intel_backlight_enable(crtc_state, conn_state);
+		return;
+	}
+
 	if (!intel_dp_is_edp(intel_dp))
 		return;
 
@@ -2155,6 +2168,12 @@ void intel_edp_backlight_off(const struct drm_connector_state *old_conn_state)
 {
 	struct intel_dp *intel_dp = enc_to_intel_dp(to_intel_encoder(old_conn_state->best_encoder));
 	struct drm_i915_private *i915 = dp_to_i915(intel_dp);
+
+	if (intel_dp_is_dp(intel_dp)) {
+		drm_dbg_kms(&i915->drm, "\n");
+		intel_backlight_disable(old_conn_state);
+		return;
+	}
 
 	if (!intel_dp_is_edp(intel_dp))
 		return;
@@ -5374,6 +5393,9 @@ intel_dp_init_connector(struct intel_digital_port *dig_port,
 	else
 		intel_connector->get_hw_state = intel_connector_get_hw_state;
 
+	intel_panel_init(intel_connector);
+	intel_backlight_setup(intel_connector, INVALID_PIPE);
+
 	if (!intel_edp_init_connector(intel_dp, intel_connector)) {
 		intel_dp_aux_fini(intel_dp);
 		goto fail;
@@ -5469,4 +5491,158 @@ void intel_dp_mst_resume(struct drm_i915_private *dev_priv)
 							false);
 		}
 	}
+}
+
+extern struct i2c_adapter *i2c_adap_mcu;
+
+char intel_dp_ser_mcu_read_reg(struct drm_device *dev, struct i2c_adapter *adapter, u8 reg_addr, u8 *val)
+{
+	u8 buf[1];
+	int ret = 0;
+
+	struct i2c_msg msg[2];
+
+	buf[0] = reg_addr & 0xff;
+
+	msg[0].addr = 0x14;
+	msg[0].flags = 0;
+	msg[0].buf = &buf[0];
+	msg[0].len = 1;
+
+	msg[1].addr = 0x14;
+	msg[1].flags = I2C_M_RD;
+	msg[1].buf = val;
+	msg[1].len = 1;
+
+	i2c_transfer(adapter, msg, 2);
+	if (ret < 0) {
+		drm_dbg_kms(dev, "[FPD_DP] [-%s-%s-%d-], fail reg_addr=0x%x, val=%u\n",
+				__FILE__, __func__, __LINE__, reg_addr, *val);
+		return -ENODEV;
+	}
+
+	drm_dbg_kms(dev, "[FPD_DP] RIB 0x%02x: 0x%02x 0x%02x OK\n", msg[1].addr, reg_addr, *val);
+	return 0;
+}
+
+bool intel_dp_mcu_write_reg(struct drm_device *dev, struct i2c_adapter *adapter, unsigned int reg_addr, u16 val)
+{
+	int ret = 0;
+	struct i2c_msg msg;
+	u8 buf[6];
+
+	buf[0] = reg_addr & 0xff;
+	buf[1] = 0x00;
+	buf[2] = 0x03;
+	buf[3] = (val & 0xff00) >> 8;
+	buf[4] = val & 0xff;
+	buf[5] = buf[0]^buf[1]^buf[2]^buf[3]^buf[4];
+
+	msg.addr = 0x28;
+	msg.flags = 0;
+	msg.buf = &buf[0];
+	msg.len = 6;
+
+	ret = i2c_transfer(adapter, &msg, 1);
+
+	if (ret < 0) {
+		drm_dbg_kms(dev, "[FPD_DP] [-%s-%s-%d-], fail client->addr=0x%02x, reg_addr=0x%02x, val=0x%02x\n",
+				__FILE__, __func__, __LINE__, msg.addr, reg_addr, val);
+		return false;
+	}
+	drm_dbg_kms(dev, "[FPD_DP] WIB 0x%02x: 0x%02x 0x%02x OK\n",
+			msg.addr, reg_addr, val);
+	drm_dbg_kms(dev, "[FPD_DP] WIB buf[0] 0x%02x OK\n",
+			buf[0]);
+	drm_dbg_kms(dev, "[FPD_DP] WIB buf[1] 0x%02x OK\n",
+			buf[1]);
+	drm_dbg_kms(dev, "[FPD_DP] WIB buf[2] 0x%02x OK\n",
+			buf[2]);
+	drm_dbg_kms(dev, "[FPD_DP] WIB buf[3] 0x%02x OK\n",
+			buf[3]);
+	drm_dbg_kms(dev, "[FPD_DP] WIB buf[4] 0x%02x OK\n",
+			buf[4]);
+	drm_dbg_kms(dev, "[FPD_DP] WIB buf[5] 0x%02x OK\n",
+			buf[5]);
+
+	return true;
+}
+
+static u32 mcu_get_backlight(struct intel_connector *connector, enum pipe unused)
+{
+	struct intel_panel *panel = &connector->panel;
+
+	return panel->backlight.level;
+}
+
+static void mcu_set_backlight(const struct drm_connector_state *conn_state, u32 level)
+{
+	struct intel_panel *panel = &to_intel_connector(conn_state->connector)->panel;
+	struct drm_device *dev = to_intel_connector(conn_state->connector)->base.dev;
+
+	u16 data = 0;
+
+	panel->backlight.level = level;
+	drm_dbg_kms(dev,
+		"[CONNECTOR:%d:%s] level = 0x%2x\n",
+		to_intel_connector(conn_state->connector)->base.base.id,
+		to_intel_connector(conn_state->connector)->base.name, level);
+
+	data = 0x0200 | level;
+	intel_dp_mcu_write_reg(dev, i2c_adap_mcu, 0x22, data);
+}
+
+static void mcu_disable_backlight(const struct drm_connector_state *conn_state, u32 level)
+{
+	struct intel_panel *panel = &to_intel_connector(conn_state->connector)->panel;
+	struct drm_device *dev = to_intel_connector(conn_state->connector)->base.dev;
+	u16 data = 0;
+
+	data = 0x0100 | panel->backlight.level;
+	intel_dp_mcu_write_reg(dev, i2c_adap_mcu, 0x22, data);
+}
+
+static void mcu_enable_backlight(const struct intel_crtc_state *crtc_state,
+				 const struct drm_connector_state *conn_state, u32 level)
+{
+	mcu_set_backlight(conn_state, level);
+}
+
+static int mcu_setup_backlight(struct intel_connector *connector,
+			       enum pipe unused)
+{
+	struct intel_panel *panel = &connector->panel;
+	struct drm_device *dev = connector->base.dev;
+
+	drm_dbg_kms(dev,
+		"[CONNECTOR:%d:%s] \n",
+		connector->base.base.id, connector->base.name);
+
+	panel->backlight.max = 100;
+	panel->backlight.level = panel->backlight.max;
+	panel->backlight.enabled = true;
+
+	return 0;
+}
+
+static const struct intel_panel_bl_funcs mcu_bl_funcs = {
+	.setup = mcu_setup_backlight,
+	.enable = mcu_enable_backlight,
+	.disable = mcu_disable_backlight,
+	.set = mcu_set_backlight,
+	.get = mcu_get_backlight,
+};
+
+int intel_dp_mcu_init_backlight_funcs(struct intel_connector *intel_connector)
+{
+	struct drm_device *dev = intel_connector->base.dev;
+	struct intel_panel *panel = &intel_connector->panel;
+
+	drm_dbg_kms(dev,
+		"[CONNECTOR:%d:%s] \n",
+		intel_connector->base.base.id, intel_connector->base.name);
+
+	panel->backlight.funcs = &mcu_bl_funcs;
+
+	return 0;
 }
