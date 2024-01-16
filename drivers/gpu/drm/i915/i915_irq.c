@@ -3926,6 +3926,7 @@ static void dg1_irq_postinstall(struct drm_i915_private *dev_priv)
 				   GEN11_DISPLAY_IRQ_ENABLE);
 	}
 
+	intel_uncore_write(&dev_priv->uncore, DG1_MSTR_TILE_INTR, REG_GENMASK(3, 0));
 	dg1_master_intr_enable(uncore->regs);
 	intel_uncore_posting_read(uncore, DG1_MSTR_TILE_INTR);
 }

@@ -311,6 +311,7 @@ void gen11_gt_irq_postinstall(struct intel_gt *gt)
 	/* Same thing for GuC interrupts */
 	intel_uncore_write(uncore, GEN11_GUC_SG_INTR_ENABLE, 0);
 	intel_uncore_write(uncore, GEN11_GUC_SG_INTR_MASK,  ~0);
+	intel_uncore_write(uncore, GEN11_GFX_MSTR_IRQ, REG_GENMASK(30, 0));
 }
 
 void gen5_gt_irq_handler(struct intel_gt *gt, u32 gt_iir)
