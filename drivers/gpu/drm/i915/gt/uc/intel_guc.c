@@ -1003,7 +1003,7 @@ static int guc_send_invalidate_tlb(struct intel_guc *guc, u32 *action, u32 size)
  * timeout and max number of outstanding invalidation requests that can be
  * queued in CT buffer.
  */
-#define OUTSTANDING_GUC_TIMEOUT_PERIOD  (HZ)
+#define OUTSTANDING_GUC_TIMEOUT_PERIOD  (10*HZ)
 	if (!must_wait_woken(&wait, OUTSTANDING_GUC_TIMEOUT_PERIOD)) {
 		/*
 		 * XXX: Failure of tlb invalidation is critical and would

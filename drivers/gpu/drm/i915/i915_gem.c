@@ -1129,6 +1129,7 @@ void i915_gem_drain_workqueue(struct drm_i915_private *i915)
 int i915_gem_init(struct drm_i915_private *dev_priv)
 {
 	int ret;
+	int retry;
 
 	/* We need to fallback to 4K pages if host doesn't support huge gtt. */
 	if (intel_vgpu_active(dev_priv) && !intel_vgpu_has_huge_gtt(dev_priv))
@@ -1158,9 +1159,21 @@ int i915_gem_init(struct drm_i915_private *dev_priv)
 	 */
 	intel_init_clock_gating(dev_priv);
 
-	ret = intel_gt_init(to_gt(dev_priv));
-	if (ret)
-		goto err_unlock;
+	udelay(10);
+	for (retry = 0; retry < 3; retry++) {
+		if (retry)
+			usleep_range(500, 1000);
+
+		ret = intel_gt_init(to_gt(dev_priv));
+		if (ret) {
+			drm_err(&dev_priv->drm, "intel_gt_init failed: %d, retry %d\n", ret, retry);
+			if (retry == 2)
+				goto err_unlock;
+
+		} else {
+			break;
+		}
+	}
 
 	return 0;
 
