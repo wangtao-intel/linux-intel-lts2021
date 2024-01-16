@@ -1158,6 +1158,7 @@ int i915_gem_init(struct drm_i915_private *dev_priv)
 	 */
 	intel_init_clock_gating(dev_priv);
 
+	udelay(10);
 	ret = intel_gt_init(to_gt(dev_priv));
 	if (ret)
 		goto err_unlock;
