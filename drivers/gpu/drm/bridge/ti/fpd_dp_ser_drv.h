@@ -35,12 +35,12 @@
 
 #define FPD_DP_SER_TX_ADD                  0x14
 #define FPD_DP_SER_RX_ADD_A                0x30
-#define FPD_DP_SER_MCU_ADD                 0x28
+#define FPD_DP_SER_MCU_ADD                 0x78
 
 #define FPD_DP_ARRAY_SIZE                  4
 
 #define DS90UB983                          0
-#define DS90UB944A                         1
+#define DS90UB984                          1
 #define DS90UBMCU                          2
 
 #define NUM_DEVICE                         3

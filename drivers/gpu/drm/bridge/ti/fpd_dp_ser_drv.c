@@ -78,7 +78,7 @@ static struct i2c_board_info fpd_dp_i2c_board_info[] = {
 		I2C_BOARD_INFO("DS90UB983", FPD_DP_SER_TX_ADD),
 	},
 	{
-		I2C_BOARD_INFO("DS90UB944A", FPD_DP_SER_RX_ADD_A),
+		I2C_BOARD_INFO("DS90UB984", FPD_DP_SER_RX_ADD_A),
 	},
 	{
 		I2C_BOARD_INFO("DS90UBMCU", FPD_DP_SER_MCU_ADD),
@@ -138,6 +138,69 @@ bool fpd_dp_ser_write_reg(struct i2c_client *client, unsigned int reg_addr, u8 v
 	pr_debug("[FPD_DP] WIB 0x%02x: 0x%02x 0x%02x OK\n",
 			client->addr, reg_addr, val);
 	return true;
+}
+
+bool fpd_dp_mcu_motor_mode(struct i2c_client *client, unsigned int reg_addr, u32 val)
+{
+	int ret = 0;
+	int i = 0;
+	struct i2c_msg msg;
+	u8 buf[7];
+
+	buf[0] = reg_addr & 0xff;
+	buf[1] = 0x00;
+	buf[2] = 0x04;
+	buf[3] = (val & 0xff0000) >> 16;//0xff;
+	buf[4] = (val & 0xff00) >> 8;
+	buf[5] = val & 0xff;
+	buf[6] = buf[0]^buf[1]^buf[2]^buf[3]^buf[4]^buf[5];
+
+	msg.addr = client->addr;
+	msg.flags = 0;
+	msg.buf = &buf[0];
+	msg.len = 7;
+
+	ret = i2c_transfer(client->adapter, &msg, 1);
+
+	if (ret < 0) {
+		pr_debug("[FPD_DP] [-%s-%s-%d-], fail client->addr=0x%02x, reg_addr=0x%02x, val=0x%03x\n",
+				__FILE__, __func__, __LINE__, msg.addr, reg_addr, val);
+		return false;
+	}
+
+	for (i = 0; i < msg.len; i++) {
+		pr_debug("[FPD_DP] WIB 0x%02x: 0x%02x buf[%d] 0x%02x OK\n",
+			msg.addr, reg_addr, i, buf[i]);
+	}
+
+	return true;
+}
+int fpd_dp_mcu_read_reg(struct i2c_client *client, unsigned int reg_addr, u8 len, u8 *data)
+{
+	struct i2c_msg msg[2];
+	int i = 0;
+	u8 buf[1];
+	int ret = 0;
+
+	buf[0] = reg_addr & 0xff;
+
+	msg[0].addr = client->addr;
+	msg[0].flags = 0;
+	msg[0].buf = &buf[0];
+	msg[0].len = sizeof(buf);
+
+	msg[1].addr = client->addr;
+	msg[1].flags = I2C_M_RD;
+	msg[1].buf = data;
+	msg[1].len = len;
+
+	ret = i2c_transfer(client->adapter, msg, 2);
+	if (ret < 0) {
+		pr_err("Failed to transfer data\n");
+		return -1;
+	}
+
+	return 0;
 }
 
 /*
@@ -202,6 +265,36 @@ void  fpd_dp_ser_set_up_mcu(struct i2c_client *client)
 	fpd_dp_ser_write_reg(client, 0x78, FPD_DP_SER_MCU_ADD << 1);
 	fpd_dp_ser_write_reg(client, 0x88, 0x0);
 	fpd_dp_ser_write_reg(client, 0x07, 0x88);
+}
+
+void  fpd_dp_ser_motor_open(struct i2c_client *client)
+{
+	u8 read_motor_mode[7] = { 0 };
+	u32 data_motor = 0;
+	int i = 0;
+
+	data_motor = 0x0050ff;
+	fpd_dp_mcu_motor_mode(client, 0x23, data_motor);
+
+	fpd_dp_mcu_read_reg(client, 0x63, 7, &read_motor_mode[0]);
+	for (i = 0; i < 7; i++)
+		pr_debug("[FPD_DP] RIB [FPD_DP] RIB 0x78: 0x63, read_motor_mode[%d] 0x%02x OK\n",
+			i, read_motor_mode[i]);
+}
+
+void  fpd_dp_ser_motor_close(struct i2c_client *client)
+{
+	u8 read_motor_mode[7] = { 0 };
+	u32 data_motor = 0;
+	int i = 0;
+
+	data_motor = 0x0000ff;
+	fpd_dp_mcu_motor_mode(client, 0x23, data_motor);
+
+	fpd_dp_mcu_read_reg(client, 0x63, 7, &read_motor_mode[0]);
+	for (i = 0; i < 7; i++)
+		pr_debug("[FPD_DP] RIB [FPD_DP] RIB 0x78: 0x63, read_motor_mode[%d] 0x%02x OK\n",
+			i, read_motor_mode[i]);
 }
 
 /**
@@ -1124,7 +1217,7 @@ bool fpd_dp_ser_setup(struct i2c_client *client)
 	fpd_dp_ser_program_vp_configs(client);
 	fpd_dp_ser_enable_vps(client);
 	/* Check if VP is synchronized to DP input */
-	queue_delayed_work(fpd_dp_priv->wq, &fpd_dp_priv->delay_work, msecs_to_jiffies(100));
+	//queue_delayed_work(fpd_dp_priv->wq, &fpd_dp_priv->delay_work, msecs_to_jiffies(100));
 
 	return true;
 }
@@ -1143,6 +1236,484 @@ bool fpd_dp_ser_disable(void)
 {
 	pr_debug("[FPD_DP] [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
 	return true;
+}
+
+/**
+ * @brief Override DES 0 eFuse
+ * @param client
+ */
+int fpd_dp_deser_984_override_efuse(struct i2c_client *client)
+{
+	u8 DES_READBACK;
+	u8 UNIQUEID_Reg0xC;
+
+	/* Override DES 0 eFuse */
+	fpd_dp_ser_read_reg(client, 0x0, &DES_READBACK);
+
+	if (DES_READBACK == 0)
+		pr_debug("[FPD_DP] Error - no DES detected\n");
+	else
+		pr_debug("[FPD_DP] Deserializer detected successfully\n");
+	fpd_dp_ser_write_reg(client, 0x49, 0xc);
+	fpd_dp_ser_write_reg(client, 0x4a, 0x0);
+	fpd_dp_ser_write_reg(client, 0x48, 0x1b);
+	fpd_dp_ser_read_reg(client, 0x4b, &UNIQUEID_Reg0xC);
+
+	if (UNIQUEID_Reg0xC != 0x19 || DES_READBACK != 0) {
+		pr_debug("[FPD_DP] Non-Final DES Silicon Detected - Overriding DES eFuse");
+		fpd_dp_ser_write_reg(client, 0xe, 0x3);
+		fpd_dp_ser_write_reg(client, 0x61, 0x0);
+		fpd_dp_ser_write_reg(client, 0x5a, 0x74);
+		fpd_dp_ser_write_reg(client, 0x5f, 0x4);
+		fpd_dp_ser_write_reg(client, 0x40, 0x3c);
+		fpd_dp_ser_write_reg(client, 0x41, 0xf5);
+		fpd_dp_ser_write_reg(client, 0x42, 0x21);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0x43);
+		fpd_dp_ser_write_reg(client, 0x42, 0x3);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0x43);
+		fpd_dp_ser_write_reg(client, 0x42, 0x3);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0x5);
+		fpd_dp_ser_write_reg(client, 0x42, 0x0);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0x5);
+		fpd_dp_ser_write_reg(client, 0x42, 0x0);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0x6);
+		fpd_dp_ser_write_reg(client, 0x42, 0x1);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0x6);
+		fpd_dp_ser_write_reg(client, 0x42, 0x1);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0x37);
+		fpd_dp_ser_write_reg(client, 0x42, 0x32);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0x37);
+		fpd_dp_ser_write_reg(client, 0x42, 0x32);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0x8d);
+		fpd_dp_ser_write_reg(client, 0x42, 0xff);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0x8d);
+		fpd_dp_ser_write_reg(client, 0x42, 0xff);
+		fpd_dp_ser_write_reg(client, 0x40, 0x5c);
+		fpd_dp_ser_write_reg(client, 0x41, 0x20);
+		fpd_dp_ser_write_reg(client, 0x42, 0x3c);
+		fpd_dp_ser_write_reg(client, 0x41, 0xa0);
+		fpd_dp_ser_write_reg(client, 0x42, 0x3c);
+		fpd_dp_ser_write_reg(client, 0x40, 0x38);
+		fpd_dp_ser_write_reg(client, 0x41, 0x24);
+		fpd_dp_ser_write_reg(client, 0x42, 0x61);
+		fpd_dp_ser_write_reg(client, 0x41, 0x54);
+		fpd_dp_ser_write_reg(client, 0x42, 0x61);
+		fpd_dp_ser_write_reg(client, 0x41, 0x2c);
+		fpd_dp_ser_write_reg(client, 0x42, 0x19);
+		fpd_dp_ser_write_reg(client, 0x41, 0x5c);
+		fpd_dp_ser_write_reg(client, 0x42, 0x19);
+		fpd_dp_ser_write_reg(client, 0x41, 0x2e);
+		fpd_dp_ser_write_reg(client, 0x42, 0x0);
+		fpd_dp_ser_write_reg(client, 0x41, 0x5e);
+		fpd_dp_ser_write_reg(client, 0x42, 0x0);
+		fpd_dp_ser_write_reg(client, 0x40, 0x10);
+		fpd_dp_ser_write_reg(client, 0x41, 0x18);
+		fpd_dp_ser_write_reg(client, 0x42, 0x4b);
+		fpd_dp_ser_write_reg(client, 0x41, 0x38);
+		fpd_dp_ser_write_reg(client, 0x42, 0x4b);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0x15);
+		fpd_dp_ser_write_reg(client, 0x42, 0x0);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0x15);
+		fpd_dp_ser_write_reg(client, 0x42, 0x0);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0x4a);
+		fpd_dp_ser_write_reg(client, 0x42, 0x1);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0x4a);
+		fpd_dp_ser_write_reg(client, 0x42, 0x1);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0xaa);
+		fpd_dp_ser_write_reg(client, 0x42, 0x2c);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0xaa);
+		fpd_dp_ser_write_reg(client, 0x42, 0x2c);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0xab);
+		fpd_dp_ser_write_reg(client, 0x42, 0x2c);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0xab);
+		fpd_dp_ser_write_reg(client, 0x42, 0x2c);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0xac);
+		fpd_dp_ser_write_reg(client, 0x42, 0x4c);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0xac);
+		fpd_dp_ser_write_reg(client, 0x42, 0x4c);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0xad);
+		fpd_dp_ser_write_reg(client, 0x42, 0x4c);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0xad);
+		fpd_dp_ser_write_reg(client, 0x42, 0x4c);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0xae);
+		fpd_dp_ser_write_reg(client, 0x42, 0xac);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0xae);
+		fpd_dp_ser_write_reg(client, 0x42, 0xac);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0xaf);
+		fpd_dp_ser_write_reg(client, 0x42, 0xac);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0xaf);
+		fpd_dp_ser_write_reg(client, 0x42, 0xac);
+		fpd_dp_ser_write_reg(client, 0x40, 0x10);
+		fpd_dp_ser_write_reg(client, 0x41, 0x5);
+		fpd_dp_ser_write_reg(client, 0x42, 0xa);
+		fpd_dp_ser_write_reg(client, 0x41, 0x25);
+		fpd_dp_ser_write_reg(client, 0x42, 0xa);
+		fpd_dp_ser_write_reg(client, 0x40, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0x89);
+		fpd_dp_ser_write_reg(client, 0x42, 0x38);
+		fpd_dp_ser_write_reg(client, 0x40, 0x58);
+		fpd_dp_ser_write_reg(client, 0x41, 0x89);
+		fpd_dp_ser_write_reg(client, 0x42, 0x38);
+		fpd_dp_ser_write_reg(client, 0x40, 0x10);
+		fpd_dp_ser_write_reg(client, 0x41, 0x1a);
+		fpd_dp_ser_write_reg(client, 0x42, 0x8);
+		fpd_dp_ser_write_reg(client, 0x41, 0x3a);
+		fpd_dp_ser_write_reg(client, 0x42, 0x8);
+		fpd_dp_ser_write_reg(client, 0x40, 0x38);
+		fpd_dp_ser_write_reg(client, 0x41, 0x6f);
+		fpd_dp_ser_write_reg(client, 0x42, 0x54);
+		fpd_dp_ser_write_reg(client, 0x41, 0x70);
+		fpd_dp_ser_write_reg(client, 0x42, 0x5);
+		fpd_dp_ser_write_reg(client, 0x41, 0x80);
+		fpd_dp_ser_write_reg(client, 0x42, 0x55);
+		fpd_dp_ser_write_reg(client, 0x41, 0x81);
+		fpd_dp_ser_write_reg(client, 0x42, 0x44);
+		fpd_dp_ser_write_reg(client, 0x41, 0x82);
+		fpd_dp_ser_write_reg(client, 0x42, 0x3);
+		fpd_dp_ser_write_reg(client, 0x41, 0x86);
+		fpd_dp_ser_write_reg(client, 0x42, 0x2c);
+		fpd_dp_ser_write_reg(client, 0x41, 0x87);
+		fpd_dp_ser_write_reg(client, 0x42, 0x6);
+		fpd_dp_ser_write_reg(client, 0x41, 0x18);
+		fpd_dp_ser_write_reg(client, 0x42, 0x32);
+		fpd_dp_ser_write_reg(client, 0x41, 0x48);
+		fpd_dp_ser_write_reg(client, 0x42, 0x32);
+		fpd_dp_ser_write_reg(client, 0x41, 0x19);
+		fpd_dp_ser_write_reg(client, 0x42, 0xe);
+		fpd_dp_ser_write_reg(client, 0x41, 0x49);
+		fpd_dp_ser_write_reg(client, 0x42, 0xe);
+		fpd_dp_ser_write_reg(client, 0x41, 0x17);
+		fpd_dp_ser_write_reg(client, 0x42, 0x72);
+		fpd_dp_ser_write_reg(client, 0x41, 0x47);
+		fpd_dp_ser_write_reg(client, 0x42, 0x72);
+		fpd_dp_ser_write_reg(client, 0x41, 0x26);
+		fpd_dp_ser_write_reg(client, 0x42, 0x87);
+		fpd_dp_ser_write_reg(client, 0x41, 0x56);
+		fpd_dp_ser_write_reg(client, 0x42, 0x87);
+		fpd_dp_ser_write_reg(client, 0x40, 0x2c);
+		fpd_dp_ser_write_reg(client, 0x41, 0x3d);
+		fpd_dp_ser_write_reg(client, 0x42, 0xd5);
+		fpd_dp_ser_write_reg(client, 0x41, 0x3e);
+		fpd_dp_ser_write_reg(client, 0x42, 0x15);
+		fpd_dp_ser_write_reg(client, 0x41, 0x7d);
+		fpd_dp_ser_write_reg(client, 0x42, 0xd5);
+		fpd_dp_ser_write_reg(client, 0x41, 0x7e);
+		fpd_dp_ser_write_reg(client, 0x42, 0x15);
+		fpd_dp_ser_write_reg(client, 0x41, 0x82);
+		fpd_dp_ser_write_reg(client, 0x42, 0x1);
+		fpd_dp_ser_write_reg(client, 0x41, 0x29);
+		fpd_dp_ser_write_reg(client, 0x42, 0x0);
+		fpd_dp_ser_write_reg(client, 0x40, 0x10);
+		fpd_dp_ser_write_reg(client, 0x41, 0x41);
+		fpd_dp_ser_write_reg(client, 0x42, 0x0);
+		fpd_dp_ser_write_reg(client, 0x41, 0x42);
+		fpd_dp_ser_write_reg(client, 0x42, 0x0);
+		fpd_dp_ser_write_reg(client, 0x40, 0x24);
+		fpd_dp_ser_write_reg(client, 0x41, 0x20);
+		fpd_dp_ser_write_reg(client, 0x42, 0x0);
+		fpd_dp_ser_write_reg(client, 0x41, 0x21);
+		fpd_dp_ser_write_reg(client, 0x42, 0x0);
+		fpd_dp_ser_write_reg(client, 0x41, 0x23);
+		fpd_dp_ser_write_reg(client, 0x42, 0x30);
+		fpd_dp_ser_write_reg(client, 0x40, 0x10);
+		fpd_dp_ser_write_reg(client, 0x41, 0x14);
+		fpd_dp_ser_write_reg(client, 0x42, 0x78);
+		fpd_dp_ser_write_reg(client, 0x41, 0x35);
+		fpd_dp_ser_write_reg(client, 0x42, 0x7e);
+		fpd_dp_ser_write_reg(client, 0x40, 0x6c);
+		fpd_dp_ser_write_reg(client, 0x41, 0xd);
+		fpd_dp_ser_write_reg(client, 0x42, 0x0);
+		fpd_dp_ser_write_reg(client, 0x40, 0x1c);
+		fpd_dp_ser_write_reg(client, 0x41, 0x8);
+		fpd_dp_ser_write_reg(client, 0x42, 0x13);
+		fpd_dp_ser_write_reg(client, 0x41, 0x28);
+		fpd_dp_ser_write_reg(client, 0x42, 0x13);
+		fpd_dp_ser_write_reg(client, 0x40, 0x14);
+		fpd_dp_ser_write_reg(client, 0x41, 0x62);
+		fpd_dp_ser_write_reg(client, 0x42, 0x31);
+		fpd_dp_ser_write_reg(client, 0x41, 0x72);
+		fpd_dp_ser_write_reg(client, 0x42, 0x31);
+		fpd_dp_ser_write_reg(client, 0x41, 0x61);
+		fpd_dp_ser_write_reg(client, 0x42, 0x26);
+		fpd_dp_ser_write_reg(client, 0x41, 0x71);
+		fpd_dp_ser_write_reg(client, 0x42, 0x26);
+		/* Soft Reset DES */
+		fpd_dp_ser_write_reg(client, 0x1, 0x1);
+		usleep_range(20000, 22000);
+	}
+
+	return 0;
+}
+
+/**
+ * @brief Program quad pixel clock for DP port 0
+ * @param client
+ */
+void fpd_dp_deser_984_prog_pclk(struct i2c_client *client)
+{
+	pr_debug("[FPD_DP] Program quad pixel clock for DP port 0\n");
+	/* Select Port0 registers */
+	fpd_dp_ser_write_reg(client, 0xe, 0x1);
+	/* Enable clock divider */
+	fpd_dp_ser_write_reg(client, 0xb1, 0x1);
+	/* Program M value lower byte */
+	fpd_dp_ser_write_reg(client, 0xb2, 0xb6);
+	/* Program M value middle byte */
+	fpd_dp_ser_write_reg(client, 0xb3, 0x30);
+	/* Program M value upper byte*/
+	fpd_dp_ser_write_reg(client, 0xb4, 0x5);
+	/* Program N value lower byte */
+	fpd_dp_ser_write_reg(client, 0xb5, 0xc0);
+	/* Program N value middle byte */
+	fpd_dp_ser_write_reg(client, 0xb6, 0x7a);
+	/* Program N value upper byte */
+	fpd_dp_ser_write_reg(client, 0xb7, 0x10);
+	/* Select Port 0 registers */
+	fpd_dp_ser_write_reg(client, 0xe, 0x1);
+}
+
+/**
+ * @brief Setup DTG for port 0
+ * @param client
+ */
+void fpd_dp_deser_984_setup_dtg(struct i2c_client *client)
+{
+	pr_debug("[FPD_DP] Setup DTG for port 0\n");
+	/* Select DTG Page */
+	fpd_dp_ser_write_reg(client, 0x40, 0x50);
+	fpd_dp_ser_write_reg(client, 0x41, 0x20);
+	/* Set up Local Display DTG BPP, Sync Polarities, and Measurement Type */
+	fpd_dp_ser_write_reg(client, 0x42, 0x93);
+	/* Set Hstart */
+	fpd_dp_ser_write_reg(client, 0x41, 0x29);
+	/* Hstart upper byte */
+	fpd_dp_ser_write_reg(client, 0x42, 0x82);
+	fpd_dp_ser_write_reg(client, 0x41, 0x2a);
+	/* Hstart lower byte */
+	fpd_dp_ser_write_reg(client, 0x42, 0x0);
+	/* Set HSW */
+	fpd_dp_ser_write_reg(client, 0x41, 0x2f);
+	/* HSW upper byte */
+	fpd_dp_ser_write_reg(client, 0x42, 0x40);
+	fpd_dp_ser_write_reg(client, 0x41, 0x30);
+	/* HSW lower byte */
+	fpd_dp_ser_write_reg(client, 0x42, 0x20);
+}
+
+
+/**
+ * @brief Program DPTX for DP port 0
+ * @param client
+ */
+void fpd_dp_deser_984_setup_dptx(struct i2c_client *client)
+{
+	pr_debug("[FPD_DP] Program DPTX for DP port 0\n");
+	/* Enable APB interface */
+	fpd_dp_ser_write_reg(client, 0x48, 0x1);
+	fpd_dp_ser_write_reg(client, 0x48, 0x1);
+	/* Set bit per color */
+	fpd_dp_ser_write_reg(client, 0x49, 0xa4);
+	fpd_dp_ser_write_reg(client, 0x4a, 0x1);
+	fpd_dp_ser_write_reg(client, 0x4b, 0x20);
+	fpd_dp_ser_write_reg(client, 0x4c, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4d, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
+	fpd_dp_ser_write_reg(client, 0x48, 0x1);
+	/* Set pixel width */
+	fpd_dp_ser_write_reg(client, 0x49, 0xb8);
+	fpd_dp_ser_write_reg(client, 0x4a, 0x1);
+	fpd_dp_ser_write_reg(client, 0x4b, 0x4);
+	fpd_dp_ser_write_reg(client, 0x4c, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4d, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
+	fpd_dp_ser_write_reg(client, 0x48, 0x1);
+	/* Set DP Mvid */
+	fpd_dp_ser_write_reg(client, 0x49, 0xac);
+	fpd_dp_ser_write_reg(client, 0x4a, 0x1);
+	fpd_dp_ser_write_reg(client, 0x4b, 0x41);
+	fpd_dp_ser_write_reg(client, 0x4c, 0xa1);
+	fpd_dp_ser_write_reg(client, 0x4d, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
+	fpd_dp_ser_write_reg(client, 0x48, 0x1);
+	/* Set DP Nvid */
+	fpd_dp_ser_write_reg(client, 0x49, 0xb4);
+	fpd_dp_ser_write_reg(client, 0x4a, 0x1);
+	fpd_dp_ser_write_reg(client, 0x4b, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4c, 0x80);
+	fpd_dp_ser_write_reg(client, 0x4d, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
+	fpd_dp_ser_write_reg(client, 0x48, 0x1);
+	/* Set TU Mode */
+	fpd_dp_ser_write_reg(client, 0x49, 0xc8);
+	fpd_dp_ser_write_reg(client, 0x4a, 0x1);
+	fpd_dp_ser_write_reg(client, 0x4b, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4c, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4d, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
+	fpd_dp_ser_write_reg(client, 0x48, 0x1);
+	/* Set TU Size */
+	fpd_dp_ser_write_reg(client, 0x49, 0xb0);
+	fpd_dp_ser_write_reg(client, 0x4a, 0x1);
+	fpd_dp_ser_write_reg(client, 0x4b, 0x40);
+	fpd_dp_ser_write_reg(client, 0x4c, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4d, 0x3c);
+	fpd_dp_ser_write_reg(client, 0x4e, 0x8);
+	fpd_dp_ser_write_reg(client, 0x48, 0x1);
+	/* Set FIFO Size */
+	fpd_dp_ser_write_reg(client, 0x49, 0xc8);
+	fpd_dp_ser_write_reg(client, 0x4a, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4b, 0x4);
+	fpd_dp_ser_write_reg(client, 0x4c, 0x40);
+	fpd_dp_ser_write_reg(client, 0x4d, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
+	fpd_dp_ser_write_reg(client, 0x48, 0x1);
+	/* Set data count */
+	fpd_dp_ser_write_reg(client, 0x49, 0xbc);
+	fpd_dp_ser_write_reg(client, 0x4a, 0x1);
+	fpd_dp_ser_write_reg(client, 0x4b, 0x70);
+	fpd_dp_ser_write_reg(client, 0x4c, 0x8);
+	fpd_dp_ser_write_reg(client, 0x4d, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
+	fpd_dp_ser_write_reg(client, 0x48, 0x1);
+	/* Disable STREAM INTERLACED */
+	fpd_dp_ser_write_reg(client, 0x49, 0xc0);
+	fpd_dp_ser_write_reg(client, 0x4a, 0x1);
+	fpd_dp_ser_write_reg(client, 0x4b, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4c, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4d, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
+	fpd_dp_ser_write_reg(client, 0x48, 0x1);
+	/* Set SYNC polarity */
+	fpd_dp_ser_write_reg(client, 0x49, 0xc4);
+	fpd_dp_ser_write_reg(client, 0x4a, 0x1);
+	fpd_dp_ser_write_reg(client, 0x4b, 0xc);
+	fpd_dp_ser_write_reg(client, 0x4c, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4d, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
+}
+
+/**
+ * @brief Release Des DTG reset
+ * @param client
+ */
+void fpd_dp_deser_984_release_dtg_reset(struct i2c_client *client)
+{
+	pr_debug("[FPD_DP] Release Des 0 DTG reset and enable video output\n");
+	/* Select DTG Page */
+	fpd_dp_ser_write_reg(client, 0x40, 0x50);
+	fpd_dp_ser_write_reg(client, 0x41, 0x32);
+	/* Release Local Display Output Port 0 DTG */
+	fpd_dp_ser_write_reg(client, 0x42, 0x4);
+	fpd_dp_ser_write_reg(client, 0x41, 0x62);
+	/* Release Local Display Output Port 1 DTG */
+	fpd_dp_ser_write_reg(client, 0x42, 0x4);
+	fpd_dp_ser_write_reg(client, 0x48, 0x1);
+	/* Set Htotal */
+	fpd_dp_ser_write_reg(client, 0x49, 0x80);
+	fpd_dp_ser_write_reg(client, 0x4a, 0x1);
+	fpd_dp_ser_write_reg(client, 0x4b, 0x70);
+	fpd_dp_ser_write_reg(client, 0x4c, 0xd);
+	fpd_dp_ser_write_reg(client, 0x4d, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
+}
+
+/**
+ * @brief Enable DP 0 output
+ * @param client
+ */
+void fpd_dp_deser_984_enable_output(struct i2c_client *client)
+{
+	pr_debug("[FPD_DP] Enable DP 0 output\n");
+	fpd_dp_ser_write_reg(client, 0x48, 0x1);
+	/* Enable DP output */
+	fpd_dp_ser_write_reg(client, 0x49, 0x84);
+	fpd_dp_ser_write_reg(client, 0x4a, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4b, 0x1);
+	fpd_dp_ser_write_reg(client, 0x4c, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4d, 0x0);
+	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
+	/* Enable INTB_IN */
+	fpd_dp_ser_write_reg(client, 0x44, 0x81);
+}
+
+void fpd_dp_deser_984_enable(void)
+{
+	pr_debug("[FPD_DP] [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
+
+	fpd_dp_ser_configure_serializer_tx_link_layer(fpd_dp_priv->priv_dp_client[0]);
+	fpd_dp_deser_984_override_efuse(fpd_dp_priv->priv_dp_client[1]);
+	fpd_dp_ser_clear_crc_error(fpd_dp_priv->priv_dp_client[0]);
+	fpd_dp_deser_hold_dtg_reset(fpd_dp_priv->priv_dp_client[1]);
+	fpd_dp_deser_disalbe_stream_mapping(fpd_dp_priv->priv_dp_client[1]);
+	fpd_dp_deser_force_dp_rate(fpd_dp_priv->priv_dp_client[1]);
+	fpd_dp_deser_setup_ports(fpd_dp_priv->priv_dp_client[1]);
+	fpd_dp_deser_map_output(fpd_dp_priv->priv_dp_client[1]);
+	fpd_dp_deser_984_prog_pclk(fpd_dp_priv->priv_dp_client[1]);
+	fpd_dp_deser_984_setup_dtg(fpd_dp_priv->priv_dp_client[1]);
+	fpd_dp_deser_984_setup_dptx(fpd_dp_priv->priv_dp_client[1]);
+	fpd_dp_deser_984_release_dtg_reset(fpd_dp_priv->priv_dp_client[1]);
+	fpd_dp_deser_984_enable_output(fpd_dp_priv->priv_dp_client[1]);
+}
+
+/**
+ * @brief Check if VP is synchronized to DP input
+ * @param work
+ */
+static void fpd_poll_984_training(void)
+{
+	u8 VP0sts = 0;
+
+	pr_debug("[FPD_DP] Check if VP is synchronized to DP input\n");
+
+	/* Delay for VPs to sync to DP source */
+	usleep_range(20000, 22000);
+
+	/* Select VP Page */
+	fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x40, 0x31);
+	fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x41, 0x30);
+	fpd_dp_ser_read_reg(fpd_dp_priv->priv_dp_client[0], 0x42, &VP0sts);
+	pr_debug("[FPD_DP] VP0sts = 0x%02x\n", (VP0sts & 0x01));
+
+	if (((VP0sts & 0x01) == 0)) {
+		pr_debug("[FPD_DP]  VPs not synchronized - performing video input reset\n");
+		/* Video Input Reset if VP is not synchronized */
+		fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x49, 0x54);
+		fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x4a, 0x0);
+		fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x4b, 0x1);
+		fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x4c, 0x0);
+		fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x4d, 0x0);
+		fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x4e, 0x0);
+	}
+
+	pr_debug("[FPD_DP] ser training lock completed, count = %d\n", fpd_dp_priv->count);
+
+	fpd_dp_deser_984_enable();
 }
 
 void fpd_dp_deser_enable(void)
@@ -1223,10 +1794,15 @@ int fpd_dp_ser_init(void)
 {
 	fpd_dp_ser_enable();
 
+	/* Check if VP is synchronized to DP input */
+	fpd_poll_984_training();
+
 	fpd_dp_ser_set_up_mcu(fpd_dp_priv->priv_dp_client[0]);
 
 	if (!fpd_dp_priv->priv_dp_client[2])
 		fpd_dp_priv->priv_dp_client[2] = i2c_new_dummy_device(fpd_dp_priv->i2c_adap, fpd_dp_i2c_board_info[2].addr);
+
+	fpd_dp_ser_motor_open(fpd_dp_priv->priv_dp_client[2]);
 
 	return 0;
 }
@@ -1299,6 +1875,9 @@ static int fpd_dp_ser_remove(struct platform_device *pdev) {
 			else
 				fpd_dp_deser_soft_reset(client);
 			if (client != NULL) {
+				if (i == 2)
+					fpd_dp_ser_motor_close(client);
+
 				i2c_unregister_device(client);
 			}
 		}
@@ -1403,7 +1982,8 @@ static const struct dev_pm_ops fdp_dp_ser_pmops = {
 
 static const struct i2c_device_id fpd_dp_ser_i2c_id_table[] = {
 	{ "DS90UB983",  DS90UB983 },
-	{ "DS90UB944A", DS90UB944A },
+	{ "DS90UB984",  DS90UB984 },
+	{ "DS90UBMCU",  DS90UBMCU },
 	{ },
 };
 

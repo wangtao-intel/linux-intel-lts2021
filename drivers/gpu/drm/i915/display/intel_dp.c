@@ -90,6 +90,7 @@
 #define INTEL_DP_RESOLUTION_STANDARD	(2 << INTEL_DP_RESOLUTION_SHIFT_MASK)
 #define INTEL_DP_RESOLUTION_FAILSAFE	(3 << INTEL_DP_RESOLUTION_SHIFT_MASK)
 
+#define I2C_MCU_ADDRESS					0x78
 
 /* Constants for DP DSC configurations */
 static const u8 valid_dsc_bpp[] = {6, 8, 10, 12, 15};
@@ -5538,7 +5539,7 @@ bool intel_dp_mcu_write_reg(struct drm_device *dev, struct i2c_adapter *adapter,
 	buf[4] = val & 0xff;
 	buf[5] = buf[0]^buf[1]^buf[2]^buf[3]^buf[4];
 
-	msg.addr = 0x28;
+	msg.addr = I2C_MCU_ADDRESS;
 	msg.flags = 0;
 	msg.buf = &buf[0];
 	msg.len = 6;
