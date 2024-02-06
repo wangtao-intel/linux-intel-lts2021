@@ -9,7 +9,9 @@
 #include <drm/drm_fourcc.h>
 
 #include "i915_debugfs.h"
+#include "intel_crtc.h"
 #include "intel_de.h"
+#include "intel_crtc_state_dump.h"
 #include "intel_display_debugfs.h"
 #include "intel_display_power.h"
 #include "intel_display_power_well.h"
@@ -1152,6 +1154,33 @@ static int i915_lpsp_status(struct seq_file *m, void *unused)
 	return 0;
 }
 
+static int i915_fifo_underruns(struct seq_file *m, void *unused)
+{
+	struct drm_i915_private *dev_priv = node_to_i915(m->private);
+	struct intel_crtc *crtc;
+	enum pipe pipe;
+	unsigned long flags;
+	u32 cpu_fifo_underrun_count[I915_MAX_PIPES];
+	u32 pch_fifo_underrun_count[I915_MAX_PIPES];
+
+
+	spin_lock_irqsave(&dev_priv->irq_lock, flags);
+	for_each_pipe(dev_priv, pipe) {
+		crtc = intel_crtc_for_pipe(dev_priv, pipe);
+		cpu_fifo_underrun_count[pipe] = crtc->cpu_fifo_underrun_count;
+		pch_fifo_underrun_count[pipe] = crtc->pch_fifo_underrun_count;
+	}
+	spin_unlock_irqrestore(&dev_priv->irq_lock, flags);
+
+	seq_printf(m, "\t%-10s \t%10s\n", "cpu fifounderruns", "pch fifounderruns");
+	for_each_pipe(dev_priv, pipe)
+		seq_printf(m, "pipe:%c %10u %20u\n", pipe_name(pipe),
+			   cpu_fifo_underrun_count[pipe],
+			   pch_fifo_underrun_count[pipe]);
+
+	return 0;
+}
+
 static int i915_dp_mst_info(struct seq_file *m, void *unused)
 {
 	struct drm_i915_private *dev_priv = node_to_i915(m->private);
@@ -1870,6 +1899,30 @@ i915_fifo_underrun_reset_write(struct file *filp,
 	return cnt;
 }
 
+static int i915_suppress_wakeup_hpd_set(void *data, u64 val)
+{
+	struct drm_i915_private *i915 = data;
+
+	drm_dbg_kms(&i915->drm, "Ignoring long HPDs: %s\n", str_yes_no(val));
+
+	i915->hotplug.ignore_long_hpd = val;
+
+	return 0;
+}
+
+static int i915_suppress_wakeup_hpd_get(void *data, u64 *val)
+{
+	struct drm_i915_private *i915 = data;
+
+	*val = i915->hotplug.ignore_long_hpd;
+
+	return 0;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(i915_suppress_wakeup_hpd_fops,
+			i915_suppress_wakeup_hpd_get,
+			i915_suppress_wakeup_hpd_set, "%llu\n");
+
 static const struct file_operations i915_fifo_underrun_reset_ops = {
 	.owner = THIS_MODULE,
 	.open = simple_open,
@@ -1892,6 +1945,7 @@ static const struct drm_info_list intel_display_debugfs_list[] = {
 	{"i915_ddb_info", i915_ddb_info, 0},
 	{"i915_drrs_status", i915_drrs_status, 0},
 	{"i915_lpsp_status", i915_lpsp_status, 0},
+	{"i915_fifo_underruns", i915_fifo_underruns, 0},
 };
 
 static const struct {
@@ -1910,12 +1964,45 @@ static const struct {
 	{"i915_ipc_status", &i915_ipc_status_fops},
 	{"i915_drrs_ctl", &i915_drrs_ctl_fops},
 	{"i915_edp_psr_debug", &i915_edp_psr_debug_fops},
+	{"i915_suppress_wakeup_hpd", &i915_suppress_wakeup_hpd_fops},
 };
+
+static int dither_state_show(struct seq_file *m, void *data)
+{
+	struct intel_crtc *crtc = to_intel_crtc(m->private);
+	struct drm_i915_private *dev_priv = to_i915(crtc->base.dev);
+	struct intel_crtc_state *crtc_state;
+	int ret;
+
+	if (!HAS_DISPLAY(dev_priv))
+		return -ENODEV;
+
+	ret = drm_modeset_lock_single_interruptible(&crtc->base.mutex);
+	if (ret)
+		return ret;
+
+	crtc_state = to_intel_crtc_state(crtc->base.state);
+	seq_printf(m, "bpc: %u\n", crtc_state->pipe_bpp / 3);
+	seq_printf(m, "Dither: %u\n", (crtc_state->dither) ? 1 : 0);
+	seq_printf(m, "Dither_CC1: %u\n",
+		(crtc_state->gamma_mode & GAMMA_MODE_DITHER_AFTER_CC1) ? 1 : 0);
+
+	drm_modeset_unlock(&crtc->base.mutex);
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(dither_state);
 
 void intel_display_debugfs_register(struct drm_i915_private *i915)
 {
 	struct drm_minor *minor = i915->drm.primary;
+	struct drm_device *dev = &i915->drm;
+	struct drm_crtc *crtc;
 	int i;
+
+	drm_for_each_crtc(crtc, dev)
+		debugfs_create_file("dither", 0444, crtc->debugfs_entry, crtc,
+				    &dither_state_fops);
 
 	for (i = 0; i < ARRAY_SIZE(intel_display_debugfs_files); i++) {
 		debugfs_create_file(intel_display_debugfs_files[i].name,
@@ -2078,6 +2165,13 @@ static int i915_dsc_fec_support_show(struct seq_file *m, void *data)
 			   str_yes_no(crtc_state->dsc.compression_enable));
 		seq_printf(m, "DSC_Sink_Support: %s\n",
 			   str_yes_no(drm_dp_sink_supports_dsc(intel_dp->dsc_dpcd)));
+		seq_printf(m, "DSC_Output_Format_Sink_Support: RGB: %s YCBCR420: %s YCBCR444: %s\n",
+			   str_yes_no(drm_dp_dsc_sink_supports_format(intel_dp->dsc_dpcd,
+								      DP_DSC_RGB)),
+			   str_yes_no(drm_dp_dsc_sink_supports_format(intel_dp->dsc_dpcd,
+								      DP_DSC_YCbCr420_Native)),
+			   str_yes_no(drm_dp_dsc_sink_supports_format(intel_dp->dsc_dpcd,
+								      DP_DSC_YCbCr444)));
 		seq_printf(m, "Force_DSC_Enable: %s\n",
 			   str_yes_no(intel_dp->force_dsc_en));
 		if (!intel_dp_is_edp(intel_dp))
@@ -2203,6 +2297,73 @@ static const struct file_operations i915_dsc_bpc_fops = {
 	.write = i915_dsc_bpc_write
 };
 
+static int i915_dsc_output_format_show(struct seq_file *m, void *data)
+{
+	struct drm_connector *connector = m->private;
+	struct drm_device *dev = connector->dev;
+	struct drm_crtc *crtc;
+	struct intel_crtc_state *crtc_state;
+	struct intel_encoder *encoder = intel_attached_encoder(to_intel_connector(connector));
+	int ret;
+
+	if (!encoder)
+		return -ENODEV;
+
+	ret = drm_modeset_lock_single_interruptible(&dev->mode_config.connection_mutex);
+	if (ret)
+		return ret;
+
+	crtc = connector->state->crtc;
+	if (connector->status != connector_status_connected || !crtc) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	crtc_state = to_intel_crtc_state(crtc->state);
+	seq_printf(m, "DSC_Output_Format: %s\n",
+		   intel_output_format_name(crtc_state->output_format));
+
+out:	drm_modeset_unlock(&dev->mode_config.connection_mutex);
+
+	return ret;
+}
+
+static ssize_t i915_dsc_output_format_write(struct file *file,
+					    const char __user *ubuf,
+					    size_t len, loff_t *offp)
+{
+	struct drm_connector *connector =
+		((struct seq_file *)file->private_data)->private;
+	struct intel_encoder *encoder = intel_attached_encoder(to_intel_connector(connector));
+	struct intel_dp *intel_dp = enc_to_intel_dp(encoder);
+	int dsc_output_format = 0;
+	int ret;
+
+	ret = kstrtoint_from_user(ubuf, len, 0, &dsc_output_format);
+	if (ret < 0)
+		return ret;
+
+	intel_dp->force_dsc_output_format = dsc_output_format;
+	*offp += len;
+
+	return len;
+}
+
+static int i915_dsc_output_format_open(struct inode *inode,
+				       struct file *file)
+{
+	return single_open(file, i915_dsc_output_format_show, inode->i_private);
+}
+
+static const struct file_operations i915_dsc_output_format_fops = {
+	.owner = THIS_MODULE,
+	.open = i915_dsc_output_format_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+	.write = i915_dsc_output_format_write
+};
+
 /*
  * Returns the Current CRTC's bpc.
  * Example usage: cat /sys/kernel/debug/dri/0/crtc-0/i915_current_bpc
@@ -2272,6 +2433,9 @@ void intel_connector_debugfs_add(struct intel_connector *intel_connector)
 
 		debugfs_create_file("i915_dsc_bpc", 0644, root,
 				    connector, &i915_dsc_bpc_fops);
+
+		debugfs_create_file("i915_dsc_output_format", 0644, root,
+				    connector, &i915_dsc_output_format_fops);
 	}
 
 	if (connector->connector_type == DRM_MODE_CONNECTOR_DSI ||

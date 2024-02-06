@@ -6,24 +6,38 @@
 #include <linux/sort.h>
 #include <drm/drm_cache.h>
 
+#include "gem/i915_gem_context.h"
+#include "gem/i915_gem_internal.h"
+#include "gem/i915_gem_lmem.h"
 #include "gt/intel_gt.h"
 #include "gt/intel_engine_user.h"
 
 #include "i915_selftest.h"
 
-#include "gem/i915_gem_context.h"
-#include "gem/i915_gem_internal.h"
 #include "selftests/igt_flush_test.h"
 #include "selftests/i915_random.h"
 #include "selftests/mock_drm.h"
 #include "huge_gem_object.h"
 #include "mock_context.h"
+#include "gem/i915_gem_region.h"
 
 static int wrap_ktime_compare(const void *A, const void *B)
 {
 	const ktime_t *a = A, *b = B;
 
 	return ktime_compare(*a, *b);
+}
+
+static struct drm_i915_gem_object *
+perf_object_create(struct drm_i915_private *i915, unsigned long sz)
+{
+	struct drm_i915_gem_object *obj;
+
+	obj = i915_gem_object_create_lmem(i915, sz, I915_BO_ALLOC_USER);
+	if (IS_ERR(obj))
+		obj = i915_gem_object_create_internal(i915, sz);
+
+	return obj;
 }
 
 static int __perf_fill_blt(struct drm_i915_gem_object *obj)
@@ -68,8 +82,9 @@ static int __perf_fill_blt(struct drm_i915_gem_object *obj)
 			return err;
 
 		sort(t, ARRAY_SIZE(t), sizeof(*t), wrap_ktime_compare, NULL);
-		pr_info("%s: blt %zd KiB fill: %lld MiB/s\n",
+		pr_info("%s(%s): blt %zd KiB fill: %lld MiB/s\n",
 			engine->name,
+			obj->mm.region.mem->name,
 			obj->base.size >> 10,
 			div64_u64(mul_u32_u32(4 * obj->base.size,
 					      1000 * 1000 * 1000),
@@ -92,7 +107,7 @@ static int perf_fill_blt(void *arg)
 		struct drm_i915_gem_object *obj;
 		int err;
 
-		obj = i915_gem_object_create_internal(i915, sizes[i]);
+		obj = perf_object_create(i915, sizes[i]);
 		if (IS_ERR(obj))
 			return PTR_ERR(obj);
 
@@ -130,7 +145,7 @@ static int __perf_copy_blt(struct drm_i915_gem_object *src,
 
 			t0 = ktime_get();
 
-			err = i915_gem_object_copy_blt(src, dst, ce);
+			err = i915_gem_object_copy_blt(src, dst, ce, false);
 			if (err)
 				break;
 
@@ -148,8 +163,9 @@ static int __perf_copy_blt(struct drm_i915_gem_object *src,
 			return err;
 
 		sort(t, ARRAY_SIZE(t), sizeof(*t), wrap_ktime_compare, NULL);
-		pr_info("%s: blt %zd KiB copy: %lld MiB/s\n",
+		pr_info("%s(%s): blt %zd KiB copy: %lld MiB/s\n",
 			engine->name,
+			src->mm.region.mem->name,
 			src->base.size >> 10,
 			div64_u64(mul_u32_u32(4 * src->base.size,
 					      1000 * 1000 * 1000),
@@ -172,11 +188,11 @@ static int perf_copy_blt(void *arg)
 		struct drm_i915_gem_object *src, *dst;
 		int err;
 
-		src = i915_gem_object_create_internal(i915, sizes[i]);
+		src = perf_object_create(i915, sizes[i]);
 		if (IS_ERR(src))
 			return PTR_ERR(src);
 
-		dst = i915_gem_object_create_internal(i915, sizes[i]);
+		dst = perf_object_create(i915, sizes[i]);
 		if (IS_ERR(dst)) {
 			err = PTR_ERR(dst);
 			goto err_src;
@@ -247,6 +263,11 @@ static int igt_fill_blt_thread(void *arg)
 		u32 *vaddr;
 		u32 i;
 
+
+		/* sending one byte of data as per PVC_MEM_SET_CMD in PVC */
+		if (HAS_LINK_COPY_ENGINES(engine->i915))
+			val = val & 0xff;
+
 		total = min(total, max);
 		sz = i915_prandom_u32_max_state(total, prng) + 1;
 		phys_sz = sz % max_phys_size + 1;
@@ -281,6 +302,7 @@ static int igt_fill_blt_thread(void *arg)
 			obj->cache_dirty = true;
 
 		err = i915_gem_object_fill_blt(obj, ce, val);
+
 		if (err)
 			goto err_unpin;
 
@@ -292,7 +314,12 @@ static int igt_fill_blt_thread(void *arg)
 			if (!(obj->cache_coherent & I915_BO_CACHE_COHERENT_FOR_READ))
 				drm_clflush_virt_range(&vaddr[i], sizeof(vaddr[i]));
 
-			if (vaddr[i] != val) {
+			if (HAS_LINK_COPY_ENGINES(engine->i915))
+				err = (vaddr[i] != (val << 24 | val << 16 | val << 8 | val));
+			else
+				err = (vaddr[i] != val);
+
+			if (err) {
 				pr_err("vaddr[%u]=%x, expected=%x\n", i,
 				       vaddr[i], val);
 				err = -EINVAL;
@@ -302,6 +329,8 @@ static int igt_fill_blt_thread(void *arg)
 
 		i915_gem_object_unpin_map(obj);
 		i915_gem_object_put(obj);
+
+		i915_gem_drain_freed_objects(engine->i915);
 
 		total <<= 1;
 	} while (!time_after(jiffies, end));
@@ -414,7 +443,7 @@ static int igt_copy_blt_thread(void *arg)
 		if (!(dst->cache_coherent & I915_BO_CACHE_COHERENT_FOR_WRITE))
 			dst->cache_dirty = true;
 
-		err = i915_gem_object_copy_blt(src, dst, ce);
+		err = i915_gem_object_copy_blt(src, dst, ce, false);
 		if (err)
 			goto err_unpin;
 
@@ -438,6 +467,8 @@ static int igt_copy_blt_thread(void *arg)
 
 		i915_gem_object_put(src);
 		i915_gem_object_put(dst);
+
+		i915_gem_drain_freed_objects(engine->i915);
 
 		total <<= 1;
 	} while (!time_after(jiffies, end));
@@ -568,6 +599,355 @@ static int igt_copy_blt(void *arg)
 static int igt_copy_blt_ctx0(void *arg)
 {
 	return test_copy_engines(arg, igt_copy_blt_thread, SINGLE_CTX);
+}
+
+static int __igt_obj_window_blt_copy_with_ccs(struct drm_i915_private *i915,
+				     u64 size)
+{
+	struct drm_i915_gem_object *in, *src, *dst, *swap, *out;
+	struct intel_gt *gt = to_gt(i915);
+	struct intel_context *ce = gt->engine[gt->rsvd_bcs]->evict_context;
+	ktime_t t0, t1;
+	u32 *vaddr, i;
+	int err;
+	struct i915_gem_ww_ctx ww;
+	struct intel_memory_region *lmem =
+		intel_memory_region_by_type(i915, INTEL_MEMORY_LOCAL);
+	struct intel_memory_region *smem =
+		intel_memory_region_by_type(i915, INTEL_MEMORY_SYSTEM);
+
+	i915_gem_ww_ctx_init(&ww, true);
+	/* Firts Create all LMEM buf as pages size may be greated than SMEM */
+	src = i915_gem_object_create_region(lmem, size, I915_BO_ALLOC_USER);
+	if (IS_ERR(src)) {
+		err = PTR_ERR(src);
+		pr_err("create region failed. %d\n", err);
+		goto err_flush;
+	}
+	size = max_t(u64, size, src->base.size);
+	in = i915_gem_object_create_region(smem, size, 0);
+	if (IS_ERR(in)) {
+		err = PTR_ERR(in);
+		pr_err("create region failed. %d\n", err);
+		goto err_put_src;
+	}
+	swap = i915_gem_object_create_region(smem, (size + (size >> 8)), 0);
+	if (IS_ERR(swap)) {
+		err = PTR_ERR(swap);
+		pr_err("create region failed. %d\n", err);
+		goto err_put_in;
+	}
+	dst = i915_gem_object_create_region(lmem, size, I915_BO_ALLOC_USER);
+	if (IS_ERR(dst)) {
+		err = PTR_ERR(dst);
+		pr_err("create region failed. %d\n", err);
+		goto err_put_swap;
+	}
+	out = i915_gem_object_create_region(smem, size, 0);
+	if (IS_ERR(in)) {
+		err = PTR_ERR(in);
+		pr_err("create region failed. %d\n", err);
+		goto err_put_dst;
+	}
+
+retry:
+	err = i915_gem_object_lock(src, &ww);
+	if (err)
+		goto backoff;
+	err = i915_gem_object_lock(in, &ww);
+	if (err)
+		goto backoff;
+	err = i915_gem_object_lock(swap, &ww);
+	if (err)
+		goto backoff;
+	err = i915_gem_object_lock(dst, &ww);
+	if (err)
+		goto backoff;
+	err = i915_gem_object_lock(out, &ww);
+	if (err)
+		goto backoff;
+
+	vaddr = i915_gem_object_pin_map(in,
+					i915_coherent_map_type(i915, in, true));
+	if (IS_ERR(vaddr)) {
+		err = PTR_ERR(vaddr);
+		pr_err("Failed at pin map of src. %d\n", err);
+		goto err_put_out;
+	}
+	for (i = 0; i < size / sizeof(u32); i++)
+		vaddr[i] = i;
+	if (!(in->cache_coherent & I915_BO_CACHE_COHERENT_FOR_READ))
+		in->cache_dirty = true;
+	i915_gem_object_unpin_map(in);
+
+	err = i915_gem_object_ww_compressed_copy_blt(in, src, &ww, ce, false);
+	if (err)
+		goto backoff;
+
+	vaddr = i915_gem_object_pin_map(swap,
+					i915_coherent_map_type(i915, swap, true));
+	if (IS_ERR(vaddr)) {
+		err = PTR_ERR(vaddr);
+		pr_err("Failed at pin map of dst. %d\n", err);
+		goto err_put_out;
+	}
+	memset32(vaddr, 0x0bad0cad, (size + (size >> 8))/sizeof(u32));
+	if (!(swap->cache_coherent & I915_BO_CACHE_COHERENT_FOR_WRITE))
+		swap->cache_dirty = true;
+	i915_gem_object_unpin_map(swap);
+
+	vaddr = i915_gem_object_pin_map(out,
+					I915_MAP_WC);
+	if (IS_ERR(vaddr)) {
+		err = PTR_ERR(vaddr);
+		pr_err("Failed at pin map of src. %d\n", err);
+		goto err_put_out;
+	}
+	memset32(vaddr, 0xDEADBEEF, size / sizeof(u32));
+	if (!(out->cache_coherent & I915_BO_CACHE_COHERENT_FOR_WRITE))
+		out->cache_dirty = true;
+
+	err = i915_gem_object_wait(src, 0, MAX_SCHEDULE_TIMEOUT);
+	if (err)
+		goto err_unpin_out;
+
+	t0 = ktime_get();
+	err = i915_window_blt_copy(swap, src, true);
+	if (err) {
+		pr_err("i915_blt_swapin failed. %d\n", err);
+		goto err_unpin_out;
+	}
+
+	err = i915_gem_object_wait(swap, 0, MAX_SCHEDULE_TIMEOUT);
+	if (err)
+		goto err_unpin_out;
+
+	err = i915_window_blt_copy(dst, swap, true);
+	if (err) {
+		pr_err("i915_blt_swapout failed. %d\n", err);
+		goto err_unpin_out;
+	}
+
+	t1 = ktime_sub(ktime_get(), t0);
+	pr_info("Compress swapin and swapout of %zd KiB at %lld MiB/s\n", src->base.size >> 10,
+		div64_u64(mul_u32_u32(src->base.size, 1000 * 1000 * 1000),
+			  t1) >> 20);
+	err = i915_gem_object_wait(dst, 0, MAX_SCHEDULE_TIMEOUT);
+	if (err)
+		goto err_unpin_out;
+
+	err = i915_gem_object_ww_compressed_copy_blt(dst, out, &ww, ce, false);
+
+	if (err)
+		goto err_unpin_out;
+	err = i915_gem_object_wait(out, 0, MAX_SCHEDULE_TIMEOUT);
+	if (err)
+		goto err_unpin_out;
+
+	for (i = 0; i < size / sizeof(u32); i++) {
+		if (!(out->cache_coherent & I915_BO_CACHE_COHERENT_FOR_READ))
+			drm_clflush_virt_range(&vaddr[i], sizeof(vaddr[i]));
+		if (vaddr[i] != i) {
+			pr_err("vaddr[%u]=%x, expected=%x\n", i,
+		       vaddr[i], i);
+			err = -EINVAL;
+			goto err_unpin_out;
+		}
+	}
+
+err_unpin_out:
+	i915_gem_object_unpin_map(out);
+backoff:
+	if (err == -EDEADLK) {
+		err = i915_gem_ww_ctx_backoff(&ww);
+		if (!err)
+			goto retry;
+	}
+err_put_out:
+	i915_gem_object_put(out);
+err_put_dst:
+	i915_gem_object_put(dst);
+err_put_swap:
+	i915_gem_object_put(swap);
+err_put_in:
+	i915_gem_object_put(in);
+err_put_src:
+	i915_gem_object_put(src);
+err_flush:
+	i915_gem_ww_ctx_fini(&ww);
+	return err;
+}
+
+static int __igt_obj_window_blt_copy(struct drm_i915_private *i915,
+				     struct intel_memory_region *src_mem,
+				     struct intel_memory_region *dst_mem,
+				     u64 size)
+{
+	struct drm_i915_gem_object *src, *dst;
+	ktime_t t0, t1;
+	u32 *vaddr, i;
+	int err;
+
+	src = i915_gem_object_create_region(src_mem, size, 0);
+	if (IS_ERR(src)) {
+		err = PTR_ERR(src);
+		goto err;
+	}
+	size = max_t(u64, size, src->base.size);
+	i915_gem_object_lock_isolated(src);
+
+	dst = i915_gem_object_create_region(dst_mem, size, 0);
+	if (IS_ERR(dst)) {
+		err = PTR_ERR(dst);
+		goto err_put_src;
+	}
+
+	i915_gem_object_lock_isolated(dst);
+
+	vaddr = i915_gem_object_pin_map(src,
+					i915_coherent_map_type(i915, src, true));
+	if (IS_ERR(vaddr)) {
+		err = PTR_ERR(vaddr);
+		pr_err("Failed at pin map of src. %d\n", err);
+		goto err_put_dst;
+	}
+
+	for (i = 0; i < size / sizeof(u32); i++)
+		vaddr[i] = i;
+
+	if (!(src->cache_coherent & I915_BO_CACHE_COHERENT_FOR_READ))
+		src->cache_dirty = true;
+
+	vaddr = i915_gem_object_pin_map(dst,
+					i915_coherent_map_type(i915, dst, true));
+	if (IS_ERR(vaddr)) {
+		err = PTR_ERR(vaddr);
+		pr_err("Failed at pin map of dst. %d\n", err);
+		goto err_unpin_src;
+	}
+	memset32(vaddr, 0xdeadbeaf, size / sizeof(u32));
+
+	if (!(dst->cache_coherent & I915_BO_CACHE_COHERENT_FOR_WRITE))
+		dst->cache_dirty = true;
+
+	t0 = ktime_get();
+	err = i915_window_blt_copy(dst, src, false);
+	if (err)
+		goto err_unpin_dst;
+
+	t1 = ktime_sub(ktime_get(), t0);
+	pr_info("blt of %zd KiB at %lld MiB/s\n", src->base.size >> 10,
+		div64_u64(mul_u32_u32(src->base.size, 1000 * 1000 * 1000),
+			  t1) >> 20);
+
+	for (i = 0; i < size / sizeof(u32); i += 17) {
+		if (!(dst->cache_coherent & I915_BO_CACHE_COHERENT_FOR_READ))
+			drm_clflush_virt_range(&vaddr[i], sizeof(vaddr[i]));
+
+		if (vaddr[i] != i) {
+			pr_err("vaddr[%u]=%x, expected=%x\n", i,
+			       vaddr[i], i);
+			err = -EINVAL;
+			goto err_unpin_dst;
+		}
+	}
+
+err_unpin_dst:
+	i915_gem_object_unpin_map(dst);
+err_unpin_src:
+	i915_gem_object_unpin_map(src);
+err_put_dst:
+	i915_gem_object_unlock(dst);
+	i915_gem_object_put(dst);
+err_put_src:
+	i915_gem_object_unlock(src);
+	i915_gem_object_put(src);
+err:
+	if (err == -ENODEV)
+		err = 0;
+	return err;
+}
+static int igt_obj_window_blt_copy_with_ccs(void *data)
+{
+	struct drm_i915_private *i915 = data;
+	u64 size[] = {SZ_2K, SZ_4K, SZ_64K, SZ_4M, SZ_8M + SZ_2K, SZ_64M};
+
+	int i, ret = -EINVAL;
+
+	if (!HAS_FLAT_CCS(i915)) {
+		pr_info("Skipping: supported on devices with flat ccs only\n");
+		return 0;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(size); i++) {
+		ret =  __igt_obj_window_blt_copy_with_ccs(i915, size[i]);
+		if (ret < 0) {
+			pr_err("%s: Failed at lmem->smem->lmem size: %llu, err: %d\n",
+			       __func__, size[i], ret);
+			break;
+		}
+	}
+
+	return ret;
+}
+static int igt_obj_window_blt_copy(void *data)
+{
+	struct drm_i915_private *i915 = data;
+	u64 size[] = {SZ_2K, SZ_4K, SZ_64K, SZ_4M, SZ_8M + SZ_2K, SZ_64M};
+	struct intel_memory_region *lmem =
+		intel_memory_region_by_type(i915, INTEL_MEMORY_LOCAL);
+	struct intel_memory_region *smem =
+		intel_memory_region_by_type(i915, INTEL_MEMORY_SYSTEM);
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(size); i++) {
+		ret =  __igt_obj_window_blt_copy(i915, lmem, lmem, size[i]);
+		if (ret < 0) {
+			pr_err("%s: Failed at lmem->lmem size: %llu, err: %d\n",
+			       __func__, size[i], ret);
+			break;
+		}
+		ret =  __igt_obj_window_blt_copy(i915, smem, smem, size[i]);
+		if (ret < 0) {
+			pr_err("%s: Failed at smem->smem size: %llu, err: %d\n",
+			       __func__, size[i], ret);
+			break;
+		}
+		ret =  __igt_obj_window_blt_copy(i915, lmem, smem, size[i]);
+		if (ret < 0) {
+			pr_err("%s: Failed at lmem->smem size: %llu, err: %d\n",
+			       __func__, size[i], ret);
+			break;
+		}
+
+		ret =  __igt_obj_window_blt_copy(i915, smem, lmem, size[i]);
+		if (ret < 0) {
+			pr_err("%s: Failed at smem->lmem size: %llu, err: %d\n",
+			       __func__, size[i], ret);
+			break;
+		}
+	}
+
+	return ret;
+}
+
+int i915_obj_window_blt_copy_live_selftests(struct drm_i915_private *i915)
+{
+	static const struct i915_subtest tests[] = {
+		SUBTEST(igt_obj_window_blt_copy_with_ccs),
+		SUBTEST(igt_obj_window_blt_copy),
+	};
+
+	if (intel_gt_is_wedged(to_gt(i915)))
+		return 0;
+
+	if (!HAS_ENGINE(to_gt(i915), to_gt(i915)->rsvd_bcs))
+		return 0;
+
+	if (!HAS_LMEM(i915))
+		return 0;
+
+	return i915_live_subtests(tests, i915);
 }
 
 int i915_gem_object_blt_live_selftests(struct drm_i915_private *i915)

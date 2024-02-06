@@ -7,6 +7,7 @@
 #include "i915_reg.h"
 #include "intel_gt.h"
 #include "intel_gt_clock_utils.h"
+#include "intel_gt_print.h"
 #include "intel_gt_regs.h"
 
 static u32 read_reference_ts_freq(struct intel_uncore *uncore)
@@ -146,7 +147,11 @@ static u32 read_clock_frequency(struct intel_uncore *uncore)
 void intel_gt_init_clock_frequency(struct intel_gt *gt)
 {
 	gt->clock_frequency = read_clock_frequency(gt->uncore);
-	if (gt->clock_frequency)
+
+	/* Icelake appears to use another fixed frequency for CTX_TIMESTAMP */
+	if (IS_ICELAKE(gt->i915))
+		gt->clock_period_ns = NSEC_PER_SEC / 13750000;
+	else if (gt->clock_frequency)
 		gt->clock_period_ns = intel_gt_clock_interval_to_ns(gt, 1);
 
 	GT_TRACE(gt,
@@ -157,14 +162,22 @@ void intel_gt_init_clock_frequency(struct intel_gt *gt)
 			 USEC_PER_SEC));
 }
 
+void intel_gt_fini_clock_frequency(struct intel_gt *gt)
+{
+	/* Clock registers no longer accessible, stop checking */
+	gt->clock_frequency = 0;
+}
+
 #if IS_ENABLED(CONFIG_DRM_I915_DEBUG_GEM)
 void intel_gt_check_clock_frequency(const struct intel_gt *gt)
 {
+	if (!gt->clock_frequency)
+		return;
+
 	if (gt->clock_frequency != read_clock_frequency(gt->uncore)) {
-		dev_err(gt->i915->drm.dev,
-			"GT clock frequency changed, was %uHz, now %uHz!\n",
-			gt->clock_frequency,
-			read_clock_frequency(gt->uncore));
+		gt_err(gt, "GT clock frequency changed, was %uHz, now %uHz!\n",
+		       gt->clock_frequency,
+		       read_clock_frequency(gt->uncore));
 	}
 }
 #endif

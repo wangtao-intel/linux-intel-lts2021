@@ -6,6 +6,7 @@
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
 #include <linux/types.h>
+#include <linux/version.h>
 
 #include "i915_drv.h"
 #include "i915_hwmon.h"
@@ -50,6 +51,8 @@ struct hwm_drvdata {
 	struct hwm_energy_info ei;		/*  Energy info for energy1_input */
 	char name[12];
 	int gt_n;
+	bool reset_in_progress;
+	wait_queue_head_t waitq;
 };
 
 struct i915_hwmon {
@@ -119,7 +122,7 @@ hwm_field_read_and_scale(struct hwm_drvdata *ddat, i915_reg_t rgadr,
  * hwmon->scl_shift_energy of 14 bits we have 57 (63 - 20 + 14) bits before
  * energy1_input overflows. This at 1000 W is an overflow duration of 278 years.
  */
-static void
+static int
 hwm_energy(struct hwm_drvdata *ddat, long *energy)
 {
 	struct intel_uncore *uncore = ddat->uncore;
@@ -133,6 +136,9 @@ hwm_energy(struct hwm_drvdata *ddat, long *energy)
 		rgaddr = hwmon->rg.energy_status_tile;
 	else
 		rgaddr = hwmon->rg.energy_status_all;
+
+	if (!i915_mmio_reg_valid(rgaddr))
+		return -EOPNOTSUPP;
 
 	mutex_lock(&hwmon->hwmon_lock);
 
@@ -148,7 +154,38 @@ hwm_energy(struct hwm_drvdata *ddat, long *energy)
 	*energy = mul_u64_u32_shr(ei->accum_energy, SF_ENERGY,
 				  hwmon->scl_shift_energy);
 	mutex_unlock(&hwmon->hwmon_lock);
+
+	return 0;
 }
+
+int
+i915_hwmon_energy_status_get(struct drm_i915_private *i915, long *energy)
+{
+	struct i915_hwmon *hwmon = i915->hwmon;
+	struct hwm_drvdata *ddat = &hwmon->ddat;
+
+	return hwm_energy(ddat, energy);
+}
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
+static ssize_t
+hwm_power1_rated_max_show(struct device *dev, struct device_attribute *attr,
+			  char *buf)
+{
+	struct hwm_drvdata *ddat = dev_get_drvdata(dev);
+	struct i915_hwmon *hwmon = ddat->hwmon;
+	u64 val = hwm_field_read_and_scale(ddat,
+					   hwmon->rg.pkg_power_sku,
+					   PKG_PKG_TDP,
+					   hwmon->scl_shift_power,
+					   SF_POWER);
+
+	return sysfs_emit(buf, "%llu\n", val);
+}
+
+static SENSOR_DEVICE_ATTR(power1_rated_max, 0444,
+			  hwm_power1_rated_max_show, NULL, 0);
+#endif
 
 static ssize_t
 hwm_power1_max_interval_show(struct device *dev, struct device_attribute *attr,
@@ -188,6 +225,7 @@ hwm_power1_max_interval_store(struct device *dev,
 	struct hwm_drvdata *ddat = dev_get_drvdata(dev);
 	struct i915_hwmon *hwmon = ddat->hwmon;
 	u32 x, y, rxy, x_w = 2; /* 2 bits */
+	intel_wakeref_t wakeref;
 	u64 tau4, r, max_win;
 	unsigned long val;
 	int ret;
@@ -202,11 +240,24 @@ hwm_power1_max_interval_store(struct device *dev,
 	 */
 #define PKG_MAX_WIN_DEFAULT 0x12ull
 
-	/*
-	 * val must be < max in hwmon interface units. The steps below are
-	 * explained in i915_power1_max_interval_show()
-	 */
-	r = FIELD_PREP(PKG_MAX_WIN, PKG_MAX_WIN_DEFAULT);
+	/* val must be < max in hwmon interface units */
+	if (i915_mmio_reg_valid(hwmon->rg.pkg_power_sku)) {
+		with_intel_runtime_pm(ddat->uncore->rpm, wakeref)
+			r = intel_uncore_read64(ddat->uncore, hwmon->rg.pkg_power_sku);
+		/*
+		 * FIXME
+		 * Wa_22015381490:pvc rg.pkg_power_sku value is incorrect on PVC
+		 * at least. The following seems to work:
+		 *	r <<= 8;
+		 * However for now to be safe just use the default value
+		 * below. Once issue is resolved remove the one line below.
+		 */
+		r = FIELD_PREP(PKG_MAX_WIN, PKG_MAX_WIN_DEFAULT);
+	} else {
+		r = FIELD_PREP(PKG_MAX_WIN, PKG_MAX_WIN_DEFAULT);
+	}
+
+	/* Steps below are explained in i915_power1_max_interval_show() */
 	x = REG_FIELD_GET(PKG_MAX_WIN_X, r);
 	y = REG_FIELD_GET(PKG_MAX_WIN_Y, r);
 	tau4 = ((1 << x_w) | x) << y;
@@ -240,6 +291,9 @@ static SENSOR_DEVICE_ATTR(power1_max_interval, 0664,
 			  hwm_power1_max_interval_store, 0);
 
 static struct attribute *hwm_attributes[] = {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
+	&sensor_dev_attr_power1_rated_max.dev_attr.attr,
+#endif
 	&sensor_dev_attr_power1_max_interval.dev_attr.attr,
 	NULL
 };
@@ -253,6 +307,10 @@ static umode_t hwm_attributes_visible(struct kobject *kobj,
 
 	if (attr == &sensor_dev_attr_power1_max_interval.dev_attr.attr)
 		return i915_mmio_reg_valid(hwmon->rg.pkg_rapl_limit) ? attr->mode : 0;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
+	else if (attr == &sensor_dev_attr_power1_rated_max.dev_attr.attr)
+		return i915_mmio_reg_valid(hwmon->rg.pkg_power_sku) ? attr->mode : 0;
+#endif
 
 	return 0;
 }
@@ -396,31 +454,56 @@ hwm_power_max_write(struct hwm_drvdata *ddat, long val)
 {
 	struct i915_hwmon *hwmon = ddat->hwmon;
 	intel_wakeref_t wakeref;
+	DEFINE_WAIT(wait);
+	int ret = 0;
 	u32 nval;
+
+	/* Block waiting for GuC reset to complete when needed */
+	for (;;) {
+		mutex_lock(&hwmon->hwmon_lock);
+
+		prepare_to_wait(&ddat->waitq, &wait, TASK_INTERRUPTIBLE);
+
+		if (!hwmon->ddat.reset_in_progress)
+			break;
+
+		if (signal_pending(current)) {
+			ret = -EINTR;
+			break;
+		}
+
+		mutex_unlock(&hwmon->hwmon_lock);
+
+		schedule();
+	}
+	finish_wait(&ddat->waitq, &wait);
+	if (ret)
+		goto unlock;
+
+	wakeref = intel_runtime_pm_get(ddat->uncore->rpm);
 
 	/* Disable PL1 limit and verify, because the limit cannot be disabled on all platforms */
 	if (val == PL1_DISABLE) {
-		mutex_lock(&hwmon->hwmon_lock);
-		with_intel_runtime_pm(ddat->uncore->rpm, wakeref) {
-			intel_uncore_rmw(ddat->uncore, hwmon->rg.pkg_rapl_limit,
-					 PKG_PWR_LIM_1_EN, 0);
-			nval = intel_uncore_read(ddat->uncore, hwmon->rg.pkg_rapl_limit);
-		}
-		mutex_unlock(&hwmon->hwmon_lock);
+		intel_uncore_rmw(ddat->uncore, hwmon->rg.pkg_rapl_limit,
+				 PKG_PWR_LIM_1_EN, 0);
+		nval = intel_uncore_read(ddat->uncore, hwmon->rg.pkg_rapl_limit);
 
 		if (nval & PKG_PWR_LIM_1_EN)
-			return -ENODEV;
-		return 0;
+			ret = -ENODEV;
+		goto exit;
 	}
 
 	/* Computation in 64-bits to avoid overflow. Round to nearest. */
 	nval = DIV_ROUND_CLOSEST_ULL((u64)val << hwmon->scl_shift_power, SF_POWER);
 	nval = PKG_PWR_LIM_1_EN | REG_FIELD_PREP(PKG_PWR_LIM_1, nval);
 
-	hwm_locked_with_pm_intel_uncore_rmw(ddat, hwmon->rg.pkg_rapl_limit,
-					    PKG_PWR_LIM_1_EN | PKG_PWR_LIM_1,
-					    nval);
-	return 0;
+	intel_uncore_rmw(ddat->uncore, hwmon->rg.pkg_rapl_limit,
+			 PKG_PWR_LIM_1_EN | PKG_PWR_LIM_1, nval);
+exit:
+	intel_runtime_pm_put(ddat->uncore->rpm, wakeref);
+unlock:
+	mutex_unlock(&hwmon->hwmon_lock);
+	return ret;
 }
 
 static int
@@ -470,6 +553,41 @@ hwm_power_write(struct hwm_drvdata *ddat, u32 attr, int chan, long val)
 	}
 }
 
+void i915_hwmon_power_max_disable(struct drm_i915_private *i915, bool *old)
+{
+	struct i915_hwmon *hwmon = i915->hwmon;
+	u32 r;
+
+	if (!hwmon || !i915_mmio_reg_valid(hwmon->rg.pkg_rapl_limit))
+		return;
+
+	mutex_lock(&hwmon->hwmon_lock);
+
+	hwmon->ddat.reset_in_progress = true;
+	r = intel_uncore_rmw(hwmon->ddat.uncore, hwmon->rg.pkg_rapl_limit,
+			     PKG_PWR_LIM_1_EN, 0);
+	*old = !!(r & PKG_PWR_LIM_1_EN);
+
+	mutex_unlock(&hwmon->hwmon_lock);
+}
+
+void i915_hwmon_power_max_restore(struct drm_i915_private *i915, bool old)
+{
+	struct i915_hwmon *hwmon = i915->hwmon;
+
+	if (!hwmon || !i915_mmio_reg_valid(hwmon->rg.pkg_rapl_limit))
+		return;
+
+	mutex_lock(&hwmon->hwmon_lock);
+
+	intel_uncore_rmw(hwmon->ddat.uncore, hwmon->rg.pkg_rapl_limit,
+			 PKG_PWR_LIM_1_EN, old ? PKG_PWR_LIM_1_EN : 0);
+	hwmon->ddat.reset_in_progress = false;
+	wake_up_all(&hwmon->ddat.waitq);
+
+	mutex_unlock(&hwmon->hwmon_lock);
+}
+
 static umode_t
 hwm_energy_is_visible(const struct hwm_drvdata *ddat, u32 attr)
 {
@@ -493,8 +611,7 @@ hwm_energy_read(struct hwm_drvdata *ddat, u32 attr, long *val)
 {
 	switch (attr) {
 	case hwmon_energy_input:
-		hwm_energy(ddat, val);
-		return 0;
+		return hwm_energy(ddat, val);
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -682,6 +799,12 @@ hwm_get_preregistration_info(struct drm_i915_private *i915)
 		hwmon->rg.pkg_rapl_limit = GT0_PACKAGE_RAPL_LIMIT;
 		hwmon->rg.energy_status_all = GT0_PLATFORM_ENERGY_STATUS;
 		hwmon->rg.energy_status_tile = GT0_PACKAGE_ENERGY_STATUS;
+	} else if (IS_PONTEVECCHIO(i915)) {
+		hwmon->rg.pkg_power_sku_unit = PVC_GT0_PACKAGE_POWER_SKU_UNIT;
+		hwmon->rg.pkg_power_sku = PVC_GT0_PACKAGE_POWER_SKU;
+		hwmon->rg.pkg_rapl_limit = PVC_GT0_PACKAGE_RAPL_LIMIT;
+		hwmon->rg.energy_status_all = PVC_GT0_PLATFORM_ENERGY_STATUS;
+		hwmon->rg.energy_status_tile = PVC_GT0_PACKAGE_ENERGY_STATUS;
 	} else {
 		hwmon->rg.pkg_power_sku_unit = INVALID_MMIO_REG;
 		hwmon->rg.pkg_power_sku = INVALID_MMIO_REG;
@@ -742,6 +865,7 @@ void i915_hwmon_register(struct drm_i915_private *i915)
 	ddat->uncore = &i915->uncore;
 	snprintf(ddat->name, sizeof(ddat->name), "i915");
 	ddat->gt_n = -1;
+	init_waitqueue_head(&ddat->waitq);
 
 	for_each_gt(gt, i915, i) {
 		ddat_gt = hwmon->ddat_gt + i;

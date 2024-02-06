@@ -6,9 +6,21 @@
 #include <linux/types.h>
 
 #include "gt/intel_gt.h"
+#include "gt/intel_gt_print.h"
 #include "intel_guc_reg.h"
 #include "intel_huc.h"
 #include "i915_drv.h"
+#include "pxp/intel_pxp_tee_interface.h"
+#include "pxp/intel_pxp_huc.h"
+
+#define huc_printk(_huc, _level, _fmt, ...) \
+	gt_##_level(huc_to_gt(_huc), "HuC: " _fmt, ##__VA_ARGS__)
+#define huc_err(_huc, _fmt, ...)	huc_printk((_huc), err, _fmt, ##__VA_ARGS__)
+#define huc_warn(_huc, _fmt, ...)	huc_printk((_huc), warn, _fmt, ##__VA_ARGS__)
+#define huc_notice(_huc, _fmt, ...)	huc_printk((_huc), notice, _fmt, ##__VA_ARGS__)
+#define huc_info(_huc, _fmt, ...)	huc_printk((_huc), info, _fmt, ##__VA_ARGS__)
+#define huc_dbg(_huc, _fmt, ...)	huc_printk((_huc), dbg, _fmt, ##__VA_ARGS__)
+#define huc_probe_error(_huc, _fmt, ...) huc_printk((_huc), probe_error, _fmt, ##__VA_ARGS__)
 
 /**
  * DOC: HuC
@@ -42,11 +54,28 @@
  * HuC-specific commands.
  */
 
+static bool vcs_supported(struct intel_gt *gt)
+{
+	return gt->info.engine_mask ?
+		VDBOX_MASK(gt) :
+		INTEL_INFO(gt->i915)->platform_engine_mask & BIT(VCS0);
+}
+
 void intel_huc_init_early(struct intel_huc *huc)
 {
 	struct drm_i915_private *i915 = huc_to_gt(huc)->i915;
+	struct intel_gt *gt = huc_to_gt(huc);
 
 	intel_uc_fw_init_early(&huc->fw, INTEL_UC_FW_TYPE_HUC);
+
+	/* we can arrive here from i915_driver_early_probe for primary
+	 * GT with it being not fully setup hence check device info's
+	 * engine mask
+	 */
+	if (!vcs_supported(gt)) {
+		intel_uc_fw_change_status(&huc->fw, INTEL_UC_FIRMWARE_NOT_SUPPORTED);
+		return;
+	}
 
 	if (GRAPHICS_VER(i915) >= 11) {
 		huc->status.reg = GEN11_HUC_KERNEL_LOAD_INFO;
@@ -75,29 +104,25 @@ static int check_huc_loading_mode(struct intel_huc *huc)
 			      GSC_LOADS_HUC;
 
 	if (fw_needs_gsc != hw_uses_gsc) {
-		drm_err(&gt->i915->drm,
-			"mismatch between HuC FW (%s) and HW (%s) load modes\n",
-			HUC_LOAD_MODE_STRING(fw_needs_gsc),
-			HUC_LOAD_MODE_STRING(hw_uses_gsc));
+		huc_err(huc, "mismatch between FW (%s) and HW (%s) load modes\n",
+			HUC_LOAD_MODE_STRING(fw_needs_gsc), HUC_LOAD_MODE_STRING(hw_uses_gsc));
 		return -ENOEXEC;
 	}
 
 	/* make sure we can access the GSC via the mei driver if we need it */
 	if (!(IS_ENABLED(CONFIG_INTEL_MEI_PXP) && IS_ENABLED(CONFIG_INTEL_MEI_GSC)) &&
 	    fw_needs_gsc) {
-		drm_info(&gt->i915->drm,
-			 "Can't load HuC due to missing MEI modules\n");
+		huc_info(huc, "can't load due to missing MEI modules\n");
 		return -EIO;
 	}
 
-	drm_dbg(&gt->i915->drm, "GSC loads huc=%s\n", str_yes_no(fw_needs_gsc));
+	huc_dbg(huc, "loaded by GSC = %s\n", str_yes_no(fw_needs_gsc));
 
 	return 0;
 }
 
 int intel_huc_init(struct intel_huc *huc)
 {
-	struct drm_i915_private *i915 = huc_to_gt(huc)->i915;
 	int err;
 
 	err = check_huc_loading_mode(huc);
@@ -113,7 +138,7 @@ int intel_huc_init(struct intel_huc *huc)
 	return 0;
 
 out:
-	drm_info(&i915->drm, "HuC init failed with %d\n", err);
+	huc_info(huc, "initialization failed %pe\n", ERR_PTR(err));
 	return err;
 }
 
@@ -123,6 +148,27 @@ void intel_huc_fini(struct intel_huc *huc)
 		return;
 
 	intel_uc_fw_fini(&huc->fw);
+}
+
+int intel_huc_wait_for_auth_complete(struct intel_huc *huc)
+{
+	struct intel_gt *gt = huc_to_gt(huc);
+	int ret;
+
+	ret = __intel_wait_for_register(gt->uncore,
+					huc->status.reg,
+					huc->status.mask,
+					huc->status.value,
+					2, 50, NULL);
+
+	if (ret) {
+		huc_probe_error(huc, "firmware not verified %pe\n", ERR_PTR(ret));
+		return ret;
+	}
+
+	intel_uc_fw_change_status(&huc->fw, INTEL_UC_FIRMWARE_RUNNING);
+	huc_info(huc, "authenticated!\n");
+	return 0;
 }
 
 /**
@@ -152,31 +198,27 @@ int intel_huc_auth(struct intel_huc *huc)
 	if (ret)
 		goto fail;
 
+	/* GSC will do the auth */
+	if (intel_huc_is_loaded_by_gsc(huc))
+		return -ENODEV;
+
 	GEM_BUG_ON(intel_uc_fw_is_running(&huc->fw));
 
 	ret = intel_guc_auth_huc(guc, intel_guc_ggtt_offset(guc, huc->fw.rsa_data));
 	if (ret) {
-		DRM_ERROR("HuC: GuC did not ack Auth request %d\n", ret);
+		huc_probe_error(huc, "authentication by GuC failed %pe\n", ERR_PTR(ret));
 		goto fail;
 	}
 
 	/* Check authentication status, it should be done by now */
-	ret = __intel_wait_for_register(gt->uncore,
-					huc->status.reg,
-					huc->status.mask,
-					huc->status.value,
-					2, 50, NULL);
-	if (ret) {
-		DRM_ERROR("HuC: Firmware not verified %d\n", ret);
+	ret = intel_huc_wait_for_auth_complete(huc);
+	if (ret)
 		goto fail;
-	}
 
-	intel_uc_fw_change_status(&huc->fw, INTEL_UC_FIRMWARE_RUNNING);
-	drm_info(&gt->i915->drm, "HuC authenticated\n");
 	return 0;
 
 fail:
-	i915_probe_error(gt->i915, "HuC: Authentication failed %d\n", ret);
+	huc_probe_error(huc, "authentication failed %pe\n", ERR_PTR(ret));
 	intel_uc_fw_change_status(&huc->fw, INTEL_UC_FIRMWARE_LOAD_FAIL);
 	return ret;
 }

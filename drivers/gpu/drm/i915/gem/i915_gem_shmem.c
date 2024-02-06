@@ -32,19 +32,22 @@ static void check_release_pagevec(struct pagevec *pvec)
 static int shmem_get_pages(struct drm_i915_gem_object *obj)
 {
 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
-	struct intel_memory_region *mem = obj->mm.region;
-	const unsigned long page_count = obj->base.size / PAGE_SIZE;
-	unsigned long i;
+	struct intel_memory_region *mem = obj->mm.region.mem;
+	resource_size_t size = obj->base.size;
 	struct address_space *mapping;
 	struct sg_table *st;
 	struct scatterlist *sg;
 	struct sgt_iter sgt_iter;
 	struct page *page;
 	unsigned long last_pfn = 0;	/* suppress gcc warning */
-	unsigned int max_segment = i915_sg_segment_size();
+	unsigned int max_segment = i915_gem_sg_segment_size(obj);
 	unsigned int sg_page_sizes;
+	pgoff_t page_count, i;
 	gfp_t noreclaim;
 	int ret;
+
+	if (!safe_conversion(&page_count, obj->base.size >> PAGE_SHIFT))
+		return -E2BIG;
 
 	/*
 	 * Assert that the object is not currently in any GPU domain. As it
@@ -66,7 +69,7 @@ static int shmem_get_pages(struct drm_i915_gem_object *obj)
 		return -ENOMEM;
 
 rebuild_st:
-	if (sg_alloc_table(st, page_count, GFP_KERNEL)) {
+	if (sg_alloc_table(st, page_count, I915_GFP_ALLOW_FAIL)) {
 		kfree(st);
 		return -ENOMEM;
 	}
@@ -132,7 +135,7 @@ rebuild_st:
 				 * trigger the out-of-memory killer and for
 				 * this we want __GFP_RETRY_MAYFAIL.
 				 */
-				gfp |= __GFP_RETRY_MAYFAIL;
+				gfp |= __GFP_RETRY_MAYFAIL | __GFP_NOWARN;
 			}
 		} while (1);
 
@@ -190,6 +193,7 @@ rebuild_st:
 		obj->cache_dirty = true;
 
 	__i915_gem_object_set_pages(obj, st, sg_page_sizes);
+	atomic64_sub(size, &mem->avail);
 
 	return 0;
 
@@ -236,8 +240,6 @@ shmem_truncate(struct drm_i915_gem_object *obj)
 	 * backing pages, *now*.
 	 */
 	shmem_truncate_range(file_inode(obj->base.filp), 0, (loff_t)-1);
-	obj->mm.madv = __I915_MADV_PURGED;
-	obj->mm.pages = ERR_PTR(-EFAULT);
 }
 
 static void
@@ -294,9 +296,6 @@ __i915_gem_object_release_shmem(struct drm_i915_gem_object *obj,
 
 	GEM_BUG_ON(obj->mm.madv == __I915_MADV_PURGED);
 
-	if (obj->mm.madv == I915_MADV_DONTNEED)
-		obj->mm.dirty = false;
-
 	if (needs_clflush &&
 	    (obj->read_domains & I915_GEM_DOMAIN_CPU) == 0 &&
 	    !(obj->cache_coherent & I915_BO_CACHE_COHERENT_FOR_READ))
@@ -311,16 +310,19 @@ __i915_gem_object_release_shmem(struct drm_i915_gem_object *obj,
 	 * pages are swapped-in, and since execbuf binds the object before doing
 	 * the async flush, we have a race window.
 	 */
-	if (!HAS_LLC(i915))
+	if (!HAS_LLC(i915) && !IS_DGFX(i915))
 		obj->cache_dirty = true;
 }
 
 void i915_gem_object_put_pages_shmem(struct drm_i915_gem_object *obj, struct sg_table *pages)
 {
+	struct intel_memory_region *mem = obj->mm.region.mem;
+	resource_size_t size = obj->base.size;
 	struct sgt_iter sgt_iter;
 	struct pagevec pvec;
 	struct page *page;
 
+	i915_gem_object_migrate_finish(obj);
 	__i915_gem_object_release_shmem(obj, pages, true);
 
 	i915_gem_gtt_finish_pages(obj, pages);
@@ -332,30 +334,32 @@ void i915_gem_object_put_pages_shmem(struct drm_i915_gem_object *obj, struct sg_
 
 	pagevec_init(&pvec);
 	for_each_sgt_page(page, sgt_iter, pages) {
-		if (obj->mm.dirty)
+		if (obj->mm.madv == I915_MADV_WILLNEED) {
 			set_page_dirty(page);
-
-		if (obj->mm.madv == I915_MADV_WILLNEED)
 			mark_page_accessed(page);
+		}
 
 		if (!pagevec_add(&pvec, page))
 			check_release_pagevec(&pvec);
 	}
 	if (pagevec_count(&pvec))
 		check_release_pagevec(&pvec);
-	obj->mm.dirty = false;
+
+	atomic64_add(size, &mem->avail);
 
 	sg_free_table(pages);
 	kfree(pages);
 }
 
-static void
+static int
 shmem_put_pages(struct drm_i915_gem_object *obj, struct sg_table *pages)
 {
 	if (likely(i915_gem_object_has_struct_page(obj)))
 		i915_gem_object_put_pages_shmem(obj, pages);
 	else
 		i915_gem_object_put_pages_phys(obj, pages);
+
+	return 0;
 }
 
 static int
@@ -463,7 +467,7 @@ shmem_pread(struct drm_i915_gem_object *obj,
 
 static void shmem_release(struct drm_i915_gem_object *obj)
 {
-	if (obj->flags & I915_BO_ALLOC_STRUCT_PAGE)
+	if (obj->flags & I915_BO_STRUCT_PAGE)
 		i915_gem_object_release_memory_region(obj);
 
 	fput(obj->base.filp);
@@ -533,11 +537,16 @@ static int shmem_object_init(struct intel_memory_region *mem,
 	GEM_BUG_ON(!(mapping_gfp_mask(mapping) & __GFP_RECLAIM));
 
 	i915_gem_object_init(obj, &i915_gem_shmem_ops, &lock_class,
-			     flags | I915_BO_ALLOC_STRUCT_PAGE);
+			     flags | I915_BO_STRUCT_PAGE);
 	obj->write_domain = I915_GEM_DOMAIN_CPU;
 	obj->read_domains = I915_GEM_DOMAIN_CPU;
 
-	if (HAS_LLC(i915))
+	/*
+	 * Soft-pinned buffers need to be 1-way coherent from MTL onward
+	 * because GPU is no longer snooping CPU cache by default. Make it
+	 * default setting and let others to modify as needed later
+	 */
+	if (HAS_LLC(i915) || (GRAPHICS_VER_FULL(i915) >= IP_VER(12, 70)))
 		/* On some devices, we can have the GPU use the LLC (the CPU
 		 * cache) for about a 10% performance improvement
 		 * compared to uncached.  Graphics requests other than
@@ -639,10 +648,10 @@ static const struct intel_memory_region_ops shmem_region_ops = {
 	.init_object = shmem_object_init,
 };
 
-struct intel_memory_region *i915_gem_shmem_setup(struct drm_i915_private *i915,
+struct intel_memory_region *i915_gem_shmem_setup(struct intel_gt *gt,
 						 u16 type, u16 instance)
 {
-	return intel_memory_region_create(i915, 0,
+	return intel_memory_region_create(gt, 0,
 					  totalram_pages() << PAGE_SHIFT,
 					  PAGE_SIZE, 0, 0,
 					  type, instance,
