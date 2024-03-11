@@ -1366,4 +1366,14 @@ config TOUCHSCREEN_ZINITIX
 	  To compile this driver as a module, choose M here: the
 	  module will be called zinitix.
 
+config TOUCHSCREEN_EF1E_TP
+	tristate "EF1E touchscreen support"
+	depends on I2C
+	help
+	  Say Y here if you have a EF1E touchscreen.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called zinitix.
 endif
