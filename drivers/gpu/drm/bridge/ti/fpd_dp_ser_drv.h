@@ -69,6 +69,6 @@ struct fpd_dp_ser_priv {
 void fpd_dp_ser_module_exit(void);
 int fpd_dp_ser_module_init(void);
 
-int fpd_dp_ser_init(void);
+bool fpd_dp_ser_init(void);
 
 #endif /* __FPD_DP_SER_DRV__ */

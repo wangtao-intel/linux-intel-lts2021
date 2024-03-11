@@ -1660,6 +1660,9 @@ void fpd_dp_deser_984_enable_output(struct i2c_client *client)
 	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
 	/* Enable INTB_IN */
 	fpd_dp_ser_write_reg(client, 0x44, 0x81);
+	/* i2c 400k */
+	fpd_dp_ser_write_reg(client, 0x2b, 0x0a);
+	fpd_dp_ser_write_reg(client, 0x2c, 0x0b);
 }
 
 void fpd_dp_deser_984_enable(void)
@@ -1712,6 +1715,9 @@ static void fpd_poll_984_training(void)
 	}
 
 	pr_debug("[FPD_DP] ser training lock completed, count = %d\n", fpd_dp_priv->count);
+
+	/* Delay for VPs to sync to DP source */
+	usleep_range(20000, 22000);
 
 	fpd_dp_deser_984_enable();
 }
@@ -1790,7 +1796,7 @@ static int get_bus_number(void)
 	return bus_number;
 }
 
-int fpd_dp_ser_init(void)
+bool fpd_dp_ser_init(void)
 {
 	fpd_dp_ser_enable();
 
@@ -1804,7 +1810,7 @@ int fpd_dp_ser_init(void)
 
 	fpd_dp_ser_motor_open(fpd_dp_priv->priv_dp_client[2]);
 
-	return 0;
+	return true;
 }
 
 static int fpd_dp_ser_probe(struct platform_device *pdev)
@@ -1914,7 +1920,7 @@ static int fpd_dp_ser_resume(struct device *dev)
 
 	pr_debug("[FPD_DP] [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
 
-	result = fpd_dp_ser_enable();
+	result = fpd_dp_ser_init();
 	if (!result) {
 		pr_debug("Serdes enable fail in fpd_dp_ser_resume\n");
 		return -EIO;
@@ -1936,7 +1942,7 @@ static int fpd_dp_ser_runtime_resume(struct device *dev)
         bool result;
 
         pr_debug("[FPD_DP] [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
-        result = fpd_dp_ser_enable();
+        result = fpd_dp_ser_init();
         return 0;
 }
 
