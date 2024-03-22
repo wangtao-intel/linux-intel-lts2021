@@ -87,7 +87,7 @@ int tp_input_dev_report(struct tp_priv *priv, struct tp_report_data *data)
 			pressure = 0;
 			w = 0;
 		}
-		input_mt_slot(priv->input_dev, p->id);
+		input_mt_slot(priv->input_dev, p->id - 1);
 		input_mt_report_slot_state(priv->input_dev, MT_TOOL_FINGER, pressure > 0);
 		input_report_abs(priv->input_dev, ABS_MT_POSITION_X, x);
 		input_report_abs(priv->input_dev, ABS_MT_POSITION_Y, y);
