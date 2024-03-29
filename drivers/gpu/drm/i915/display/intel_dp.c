@@ -5569,6 +5569,31 @@ bool intel_dp_mcu_write_reg(struct drm_device *dev, struct i2c_adapter *adapter,
 	return true;
 }
 
+bool intel_dp_ser_write_reg(struct drm_device *dev, struct i2c_adapter *adapter, unsigned int reg_addr, u8 val)
+{
+	int ret = 0;
+	struct i2c_msg msg;
+	u8 buf[2];
+
+	buf[0] = reg_addr & 0xff;
+	buf[1] = val;
+
+	msg.addr = 0x30;
+	msg.flags = 0;
+	msg.buf = &buf[0];
+	msg.len = 2;
+
+	ret = i2c_transfer(adapter, &msg, 1);
+	if (ret < 0) {
+		drm_err(dev, "[FPD_DP] [-%s-%s-%d-], fail client->addr=0x%02x, reg_addr=0x%02x, val=0x%02x\n",
+				__FILE__, __FUNCTION__, __LINE__, msg.addr, reg_addr, val);
+		return false;
+	}
+	drm_dbg_kms(dev, "[FPD_DP] WIB 984 reset0x%02x: 0x%02x 0x%02x OK\n",
+			msg.addr, reg_addr, val);
+	return true;
+}
+
 static u32 mcu_get_backlight(struct intel_connector *connector, enum pipe unused)
 {
 	struct intel_panel *panel = &connector->panel;
@@ -5582,6 +5607,17 @@ static void mcu_set_backlight(const struct drm_connector_state *conn_state, u32 
 	struct drm_device *dev = to_intel_connector(conn_state->connector)->base.dev;
 
 	u16 data = 0;
+	static int count = 0;
+
+	if (count == 0) {
+		/* TODO: 984 reset to avoid serdes panel black screen,
+		 * the following should handle 984 reset accoding to panel
+		 * status
+		 */
+		intel_dp_ser_write_reg(dev, i2c_adap_mcu,  0x01, 0x01);
+		count = 1;
+		drm_dbg_kms(dev, "[FPD_DP] 984 reset");
+	}
 
 	panel->backlight.level = level;
 	drm_dbg_kms(dev,
