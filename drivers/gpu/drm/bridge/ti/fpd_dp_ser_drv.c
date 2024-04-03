@@ -1758,7 +1758,7 @@ static int intel_get_i2c_bus_id(int adapter_id, char *adapter_bdf, int bdf_len)
 	if (!adapter_bdf || bdf_len > 32)
 		return -1;
 
-	while (retry_count < 5) {
+	while (retry_count < 100) {
 		i = 0;
 		found = 0;
 		while ((adapter = i2c_get_adapter(i)) != NULL) {
@@ -1779,7 +1779,7 @@ static int intel_get_i2c_bus_id(int adapter_id, char *adapter_bdf, int bdf_len)
 		}
 		retry_count++;
 		pr_debug("[FPD_DP] not found retry_count %d\n", retry_count);
-		msleep(1000);
+		msleep(50);
 	}
 
 	if (found)
