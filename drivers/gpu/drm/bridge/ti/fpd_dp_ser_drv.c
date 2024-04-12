@@ -69,9 +69,11 @@
 
 #include "fpd_dp_ser_drv.h"
 
+#define PAD_CFG_DW0_GPPC_A_16              0xfd6e0AA0
 static struct platform_device *pdev;
 struct fpd_dp_ser_priv *fpd_dp_priv;
 struct i2c_adapter *i2c_adap_mcu;
+int deser_reset;
 
 static struct i2c_board_info fpd_dp_i2c_board_info[] = {
 	{
@@ -254,6 +256,10 @@ void fpd_dp_ser_reset(struct i2c_client *client)
  */
 void fpd_dp_ser_set_up_variables(struct i2c_client *client)
 {
+	/* i2c 400k */
+	fpd_dp_ser_write_reg(client, 0x2b, 0x0a);
+	fpd_dp_ser_write_reg(client, 0x2c, 0x0b);
+
 	fpd_dp_ser_write_reg(client, 0x70, FPD_DP_SER_RX_ADD_A);
 	fpd_dp_ser_write_reg(client, 0x78, FPD_DP_SER_RX_ADD_A);
 	fpd_dp_ser_write_reg(client, 0x88, 0x0);
@@ -510,6 +516,7 @@ int fpd_dp_deser_soft_reset(struct i2c_client *client)
 
 	if (fpd_dp_priv->priv_dp_client[1] != NULL) {
 		fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[1], 0x01, 0x01);
+		usleep_range(20000, 22000);
 		fpd_dp_ser_read_reg(fpd_dp_priv->priv_dp_client[1], 0x1, &des_read);
 		des_read = 0;
 		fpd_dp_ser_read_reg(fpd_dp_priv->priv_dp_client[1], 0x2, &des_read);
@@ -518,8 +525,6 @@ int fpd_dp_deser_soft_reset(struct i2c_client *client)
 
 
 	}
-
-	usleep_range(20000, 22000);
 
 	/* Select write to port0 reg */
 	fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x2d, 0x01);
@@ -585,6 +590,9 @@ int fpd_dp_ser_set_dp_config(struct i2c_client *client)
 	fpd_dp_ser_write_reg(client, 0x4c, 0x0);
 	fpd_dp_ser_write_reg(client, 0x4d, 0x0);
 	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
+
+	/* Allow time after HPD is pulled high for the source to train and provide video */
+	msleep(500);
 
 	return 0;
 }
@@ -1254,6 +1262,10 @@ int fpd_dp_deser_984_override_efuse(struct i2c_client *client)
 		pr_debug("[FPD_DP] Error - no DES detected\n");
 	else
 		pr_debug("[FPD_DP] Deserializer detected successfully\n");
+	/* i2c 400k */
+	fpd_dp_ser_write_reg(client, 0x2b, 0x0a);
+	fpd_dp_ser_write_reg(client, 0x2c, 0x0b);
+
 	fpd_dp_ser_write_reg(client, 0x49, 0xc);
 	fpd_dp_ser_write_reg(client, 0x4a, 0x0);
 	fpd_dp_ser_write_reg(client, 0x48, 0x1b);
@@ -1465,7 +1477,7 @@ int fpd_dp_deser_984_override_efuse(struct i2c_client *client)
 		fpd_dp_ser_write_reg(client, 0x42, 0x26);
 		/* Soft Reset DES */
 		fpd_dp_ser_write_reg(client, 0x1, 0x1);
-		usleep_range(20000, 22000);
+		usleep_range(30000, 32000);
 	}
 
 	return 0;
@@ -1660,9 +1672,6 @@ void fpd_dp_deser_984_enable_output(struct i2c_client *client)
 	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
 	/* Enable INTB_IN */
 	fpd_dp_ser_write_reg(client, 0x44, 0x81);
-	/* i2c 400k */
-	fpd_dp_ser_write_reg(client, 0x2b, 0x0a);
-	fpd_dp_ser_write_reg(client, 0x2c, 0x0b);
 }
 
 void fpd_dp_deser_984_enable(void)
@@ -1803,6 +1812,8 @@ bool fpd_dp_ser_init(void)
 	/* Check if VP is synchronized to DP input */
 	fpd_poll_984_training();
 
+	deser_reset = 0;
+
 	fpd_dp_ser_set_up_mcu(fpd_dp_priv->priv_dp_client[0]);
 
 	if (!fpd_dp_priv->priv_dp_client[2])
@@ -1819,6 +1830,8 @@ static int fpd_dp_ser_probe(struct platform_device *pdev)
 	struct fpd_dp_ser_priv *priv;
 	int bus_number = 0;
 	int ret = 0;
+	unsigned char  __iomem *gpio_cfg;
+	unsigned char data;
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(struct fpd_dp_ser_priv),
 			GFP_KERNEL);
@@ -1839,6 +1852,10 @@ static int fpd_dp_ser_probe(struct platform_device *pdev)
 		pr_debug("Cannot find a valid i2c bus for max serdes\n");
 		return -ENOMEM;
 	}
+
+	/* retiries when i2c timeout */
+	i2c_adap->retries = 5;
+	i2c_adap->timeout = msecs_to_jiffies(5 * 10);
 	i2c_put_adapter(i2c_adap);
 	priv->i2c_adap = i2c_adap;
 
@@ -1861,6 +1878,14 @@ static int fpd_dp_ser_probe(struct platform_device *pdev)
 			fpd_poll_training_lock);
 
 	fpd_dp_priv->count = 0;
+
+	gpio_cfg = (unsigned char *)ioremap(PAD_CFG_DW0_GPPC_A_16, 0x1);
+	data = ioread8(gpio_cfg);
+	data = data | 1;
+	iowrite8(data, gpio_cfg);
+	iounmap(gpio_cfg);
+	/* Delay for VPs to sync to DP source */
+	usleep_range(5000, 5200);
 
 	fpd_dp_ser_init();
 
@@ -1916,8 +1941,6 @@ static int fpd_dp_ser_suspend(struct device *dev)
 	pr_debug("[FPD_DP] [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
 	return 0;	
 }
-
-#define PAD_CFG_DW0_GPPC_A_16              0xfd6e0AA0
 
 static int fpd_dp_ser_resume(struct device *dev)
 {
@@ -2014,17 +2037,8 @@ int __init fpd_dp_ser_module_init(void)
 {
 	int ret = 0;
 
-	unsigned char  __iomem *gpio_cfg;
-        unsigned char data;
-
 	pdev = platform_device_register_simple(DEV_NAME, -1, NULL, 0);
 	pr_debug("[FPD_DP] [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
-
-        gpio_cfg = (unsigned char *)ioremap(PAD_CFG_DW0_GPPC_A_16, 0x1);
-        data = ioread8(gpio_cfg);
-        data = data | 1;
-        iowrite8(data, gpio_cfg);
-        iounmap(gpio_cfg);
 
 	if (!IS_ERR(pdev)) {
 		ret = platform_driver_probe(&fpd_dp_ser_driver,
@@ -2047,6 +2061,7 @@ void __exit fpd_dp_ser_module_exit(void)
 }
 
 EXPORT_SYMBOL(i2c_adap_mcu);
+EXPORT_SYMBOL(deser_reset);
 
 #ifdef MODULE
 module_init(fpd_dp_ser_module_init);

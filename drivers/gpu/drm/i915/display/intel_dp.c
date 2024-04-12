@@ -92,6 +92,8 @@
 
 #define I2C_MCU_ADDRESS					0x78
 
+extern int deser_reset;
+
 /* Constants for DP DSC configurations */
 static const u8 valid_dsc_bpp[] = {6, 8, 10, 12, 15};
 
@@ -5607,15 +5609,15 @@ static void mcu_set_backlight(const struct drm_connector_state *conn_state, u32 
 	struct drm_device *dev = to_intel_connector(conn_state->connector)->base.dev;
 
 	u16 data = 0;
-	static int count = 0;
 
-	if (count == 0) {
+	if (deser_reset == 0) {
 		/* TODO: 984 reset to avoid serdes panel black screen,
 		 * the following should handle 984 reset accoding to panel
 		 * status
 		 */
 		intel_dp_ser_write_reg(dev, i2c_adap_mcu,  0x01, 0x01);
-		count = 1;
+		usleep_range(20000, 22000);
+		deser_reset = 1;
 		drm_dbg_kms(dev, "[FPD_DP] 984 reset");
 	}
 
