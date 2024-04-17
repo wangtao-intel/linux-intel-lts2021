@@ -2423,7 +2423,12 @@ static void __dwc3_gadget_set_speed(struct dwc3 *dwc)
 
 	reg = dwc3_readl(dwc->regs, DWC3_DCFG);
 	reg &= ~(DWC3_DCFG_SPEED_MASK);
-
+	/*
+	 * Forcing to High speed as platform dont have mechanism
+	 * to detect disconnect and this will put device LPM mode
+	 * which result in slow detection on connect.
+	 */
+	speed = DWC3_DCFG_HIGHSPEED;
 	/*
 	 * WORKAROUND: DWC3 revision < 2.20a have an issue
 	 * which would cause metastability state on Run/Stop
@@ -2466,7 +2471,6 @@ static void __dwc3_gadget_set_speed(struct dwc3 *dwc)
 				reg |= DWC3_DCFG_SUPERSPEED_PLUS;
 		}
 	}
-
 	if (DWC3_IP_IS(DWC32) &&
 	    speed > USB_SPEED_UNKNOWN &&
 	    speed < USB_SPEED_SUPER_PLUS)
