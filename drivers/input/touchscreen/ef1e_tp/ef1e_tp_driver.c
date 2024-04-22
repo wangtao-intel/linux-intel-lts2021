@@ -28,6 +28,7 @@
 #include <linux/interrupt.h>
 #include <linux/kthread.h>
 #include <linux/module.h>
+#include <linux/platform_device.h>
 
 #include "ef1e_tp.h"
 #include "ef1e_tp_input.h"
@@ -39,6 +40,7 @@
 #define I2C_DES_ADDRESS				0x30
 #define I2C_MCU_ADDRESS				0x78
 
+#define EF1E_TP_PLATFORM_DEV_NAME		"ef1e_tp"
 
 /* Set polling to non-zero to enable polling mode for touchscreen data. */
 static int polling;
@@ -542,14 +544,12 @@ static void tp_priv_init(struct tp_priv *priv)
 }
 
 
-static int __init tp_driver_init(void)
+static int ef1e_tp_probe(struct platform_device *dev)
 {
 	int ret;
 	int i2c_bus_number;
 	struct i2c_adapter *i2c_adap;
 	struct tp_priv *priv = &global_tp;
-
-	tp_priv_init(priv);
 
 	i2c_bus_number = get_bus_number();
 	pr_info("i2c bus number = %d\n", i2c_bus_number);
@@ -559,7 +559,6 @@ static int __init tp_driver_init(void)
 		ret = -ENODEV;
 		goto error;
 	}
-	i2c_put_adapter(i2c_adap);
 	priv->i2c_adap = i2c_adap;
 
 	priv->i2c_mcu_client = i2c_new_dummy_device(priv->i2c_adap, I2C_MCU_ADDRESS);
@@ -629,12 +628,12 @@ error:
 	i2c_unregister_device(priv->i2c_des_client);
 	i2c_unregister_device(priv->i2c_ser_client);
 	i2c_unregister_device(priv->i2c_mcu_client);
+	i2c_put_adapter(priv->i2c_adap);
 	pr_err("Error occurring, initialization is aborted\n");
 	return ret;
 }
 
-
-static void __exit tp_driver_exit(void)
+static int ef1e_tp_remove(struct platform_device *dev)
 {
 	struct tp_priv *priv = &global_tp;
 
@@ -648,8 +647,49 @@ static void __exit tp_driver_exit(void)
 	i2c_unregister_device(priv->i2c_ser_client);
 	i2c_unregister_device(priv->i2c_mcu_client);
 	tp_input_dev_destroy(priv);
+	i2c_put_adapter(priv->i2c_adap);
 
-	pr_debug("TP driver removed\n");
+	pr_debug("ef1e_tp driver removed\n");
+	return 0;
+}
+
+static struct platform_driver ef1e_tp_driver = {
+	.probe = ef1e_tp_probe,
+	.remove = ef1e_tp_remove,
+	.driver = {
+		.name = EF1E_TP_PLATFORM_DEV_NAME,
+		.owner = THIS_MODULE,
+	},
+};
+
+static int __init tp_driver_init(void)
+{
+	int ret;
+	struct tp_priv *priv = &global_tp;
+
+	tp_priv_init(priv);
+
+	priv->dev = platform_device_register_simple(EF1E_TP_PLATFORM_DEV_NAME,
+							-1, NULL, 0);
+	if (IS_ERR_OR_NULL(priv->dev)) {
+		ret = PTR_ERR(priv->dev);
+		return ret;
+	}
+	ret = platform_driver_probe(&ef1e_tp_driver, ef1e_tp_probe);
+	if (ret) {
+		platform_device_unregister(priv->dev);
+		return ret;
+	}
+	return 0;
+}
+
+
+static void __exit tp_driver_exit(void)
+{
+	struct tp_priv *priv = &global_tp;
+
+	platform_device_unregister(priv->dev);
+	platform_driver_unregister(&ef1e_tp_driver);
 }
 
 static int __init tp_driver_init(void);
