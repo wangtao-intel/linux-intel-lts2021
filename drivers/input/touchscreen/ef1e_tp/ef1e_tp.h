@@ -34,6 +34,7 @@
 #define TP_HEIGHT 1620
 
 struct tp_priv {
+	struct platform_device *dev;
 	struct i2c_adapter *i2c_adap;
 	struct i2c_client *i2c_ser_client;
 	struct i2c_client *i2c_des_client;
