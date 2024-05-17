@@ -639,9 +639,6 @@ int fpd_dp_ser_set_dp_config(struct i2c_client *client)
 	fpd_dp_ser_write_reg(client, 0x4d, 0x0);
 	fpd_dp_ser_write_reg(client, 0x4e, 0x0);
 
-	/* Allow time after HPD is pulled high for the source to train and provide video */
-	msleep(500);
-
 	return 0;
 }
 
