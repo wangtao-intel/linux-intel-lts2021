@@ -67,13 +67,56 @@
  * DP lane number set to 4 lanes
  */
 
+#include <linux/mutex.h>
+
 #include "fpd_dp_ser_drv.h"
 
 #define PAD_CFG_DW0_GPPC_A_16              0xfd6e0AA0
+
 static struct platform_device *pdev;
 struct fpd_dp_ser_priv *fpd_dp_priv;
 struct i2c_adapter *i2c_adap_mcu;
 int deser_reset;
+
+static bool deser_ready = false;
+/*
+ * Background: This module owns serdes and MCU, that is to say, serdes and MCU
+ * would be initialized here.  However, EF1E touchscreen driver depends on the
+ * functionality of serdes and MCU, so it can start to work only when
+ * initiization is done in this module.  Thus there ought to be a way of
+ * indicating whether the initializing process is complete, which is the intent
+ * of this function.
+ */
+bool fpd_dp_ser_ready(void)
+{
+	return READ_ONCE(deser_ready);
+}
+EXPORT_SYMBOL_GPL(fpd_dp_ser_ready);
+
+void fpd_dp_ser_set_ready(bool ready)
+{
+	pr_info("set ready to %d\n", ready);
+	WRITE_ONCE(deser_ready, ready);
+}
+EXPORT_SYMBOL_GPL(fpd_dp_ser_set_ready);
+
+static DEFINE_MUTEX(fpd_dp_ser_mutex);
+/*
+ * The following functions are required to call before/after any operation to
+ * the serdes or MCU.  This is necessary to prevent resetting while another
+ * module is still reading from or writing to them.
+ */
+void fpd_dp_ser_lock_global(void)
+{
+	mutex_lock(&fpd_dp_ser_mutex);
+}
+EXPORT_SYMBOL_GPL(fpd_dp_ser_lock_global);
+
+void fpd_dp_ser_unlock_global(void)
+{
+	mutex_unlock(&fpd_dp_ser_mutex);
+}
+EXPORT_SYMBOL_GPL(fpd_dp_ser_unlock_global);
 
 static struct i2c_board_info fpd_dp_i2c_board_info[] = {
 	{
@@ -1807,6 +1850,8 @@ static int get_bus_number(void)
 
 bool fpd_dp_ser_init(void)
 {
+	fpd_dp_ser_lock_global();
+
 	fpd_dp_ser_enable();
 
 	/* Check if VP is synchronized to DP input */
@@ -1816,10 +1861,16 @@ bool fpd_dp_ser_init(void)
 
 	fpd_dp_ser_set_up_mcu(fpd_dp_priv->priv_dp_client[0]);
 
+	fpd_dp_ser_set_ready(true);
+
+	fpd_dp_ser_unlock_global();
+
 	if (!fpd_dp_priv->priv_dp_client[2])
 		fpd_dp_priv->priv_dp_client[2] = i2c_new_dummy_device(fpd_dp_priv->i2c_adap, fpd_dp_i2c_board_info[2].addr);
 
+	fpd_dp_ser_lock_global();
 	fpd_dp_ser_motor_open(fpd_dp_priv->priv_dp_client[2]);
+	fpd_dp_ser_unlock_global();
 
 	return true;
 }
@@ -1897,8 +1948,10 @@ static int fpd_dp_ser_remove(struct platform_device *pdev) {
 	struct fpd_dp_ser_priv *priv =
 		(struct fpd_dp_ser_priv*)platform_get_drvdata(pdev);
 	pr_debug("[FPD_DP] [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
-	if (priv!=NULL) {
+	if (priv != NULL) {
 		cancel_delayed_work_sync(&priv->delay_work);
+		fpd_dp_ser_lock_global();
+		fpd_dp_ser_set_ready(false);
 		for (i = 0; i < NUM_DEVICE; i++) {
 			struct i2c_client *client= priv->priv_dp_client[i];
 			if (i == 0)
@@ -1912,6 +1965,7 @@ static int fpd_dp_ser_remove(struct platform_device *pdev) {
 				i2c_unregister_device(client);
 			}
 		}
+		fpd_dp_ser_unlock_global();
 		devm_kfree(&pdev->dev, priv);
 		pr_debug("[-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
 	}
@@ -1926,17 +1980,20 @@ static int fpd_dp_ser_suspend(struct device *dev)
 	int i = 0;
 	struct fpd_dp_ser_priv *priv = dev_get_drvdata(dev);
 
+	fpd_dp_ser_lock_global();
+	fpd_dp_ser_set_ready(false);
 	/* first des reset, and then ser reset */
 	for (i = 1; i > -1; i--) {
-                        struct i2c_client *client= priv->priv_dp_client[i];
-                        if (i == 0)
-                                fpd_dp_ser_reset(client);
-                        else
-				fpd_dp_ser_write_reg(client, 0x01, 0x01);
+		struct i2c_client *client= priv->priv_dp_client[i];
+		if (i == 0)
+			fpd_dp_ser_reset(client);
+		else
+			fpd_dp_ser_write_reg(client, 0x01, 0x01);
 
-			/* after reset, wait 20ms to avoid ser/des read/write fail */
-			usleep_range(20000, 22000);
-                }
+		/* after reset, wait 20ms to avoid ser/des read/write fail */
+		usleep_range(20000, 22000);
+	}
+	fpd_dp_ser_unlock_global();
 #endif
 	pr_debug("[FPD_DP] [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
 	return 0;	

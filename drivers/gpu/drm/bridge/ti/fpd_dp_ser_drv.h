@@ -71,4 +71,9 @@ int fpd_dp_ser_module_init(void);
 
 bool fpd_dp_ser_init(void);
 
+bool fpd_dp_ser_ready(void);
+void fpd_dp_ser_set_ready(bool);
+void fpd_dp_ser_lock_global(void);
+void fpd_dp_ser_unlock_global(void);
+
 #endif /* __FPD_DP_SER_DRV__ */
