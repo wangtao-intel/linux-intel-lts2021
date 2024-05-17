@@ -60,58 +60,6 @@ module_param(ack_thread, int, 0);
 
 static struct tp_priv global_tp;
 
-static int intel_get_i2c_bus_id(int adapter_id, char *adapter_bdf, int bdf_len)
-{
-	struct i2c_adapter *adapter;
-	struct device *parent;
-	struct device *pp;
-	int i = 0;
-	int found = 0;
-	int retry_count = 0;
-
-	if (!adapter_bdf || bdf_len > 32)
-		return -1;
-
-	while (retry_count < 5) {
-		i = 0;
-		found = 0;
-		while ((adapter = i2c_get_adapter(i)) != NULL) {
-			parent = adapter->dev.parent;
-			pp = parent->parent;
-			i2c_put_adapter(adapter);
-			pr_debug("[FPD_DP] dev_name(pp): %s\n", dev_name(pp));
-			if (pp && !strncmp(adapter_bdf, dev_name(pp), bdf_len)) {
-				found = 1;
-				break;
-			}
-			i++;
-		}
-
-		if (found) {
-			pr_debug("[FPD_DP] found dev_name(pp) %s\n", dev_name(pp));
-			break;
-		}
-		retry_count++;
-		pr_debug("[FPD_DP] not found retry_count %d\n", retry_count);
-		msleep(1000);
-	}
-
-	if (found)
-		return i;
-
-	/* Not found */
-	return -1;
-}
-
-
-static int get_bus_number(void)
-{
-	char adapter_bdf[32] = ADAPTER_PP_DEV_NAME;
-	int bus_number = intel_get_i2c_bus_id(0, adapter_bdf, 32);
-	return bus_number;
-}
-
-
 static int fpd_read_reg_force(struct i2c_adapter *adapter, u16 addr, u8 reg_addr, u8 *val)
 {
 	u8 buf[1];
@@ -596,7 +544,7 @@ static int ef1e_tp_probe(struct platform_device *dev)
 	struct i2c_adapter *i2c_adap;
 	struct tp_priv *priv = &global_tp;
 
-	i2c_bus_number = get_bus_number();
+	i2c_bus_number = fpd_dp_ser_get_i2c_bus_number();
 	i2c_adap = i2c_get_adapter(i2c_bus_number);
 	if (!i2c_adap) {
 		pr_err("cannot find a valid i2c bus for tp\n");
