@@ -37,12 +37,6 @@
 struct tp_priv {
 	struct platform_device *dev;
 	struct i2c_adapter *i2c_adap;
-	struct i2c_client *i2c_ser_client;
-	struct i2c_client *i2c_des_client;
-	struct i2c_client *i2c_mcu_client;
-	u8 i2c_ser_address;
-	u8 i2c_des_address;
-	u8 i2c_mcu_address;
 
 	struct gpio_desc *tp_gpio;
 	int tp_irq;
