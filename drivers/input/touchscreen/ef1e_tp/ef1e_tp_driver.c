@@ -282,51 +282,45 @@ static void tp_irq_work(struct tp_priv *priv)
 {
 	struct tp_report_data report_data;
 	u8 command_id = TP_PROTOCOL_COMMAND_ID_QUERY;
-	int ret = 0, i, retries = 1;
+	int ret = 0, i;
 
-	do {
-		pr_debug("%s: Try to obtain tp data\n", __func__);
+	pr_debug("%s: try to obtain tp data\n", __func__);
 
-		fpd_dp_ser_lock_global();
+	fpd_dp_ser_lock_global();
 
-		if (!fpd_dp_ser_ready() || !READ_ONCE(priv->initialized)) {
-			fpd_dp_ser_unlock_global();
-			pr_info("%s: not ready to handle irq, ready = %d, "
-				"initialized = %d\n",
-				__func__,
-				fpd_dp_ser_ready(),
-				READ_ONCE(priv->initialized));
-			return;
-		}
-
-		ret = tp_get_mcu_tp_data(priv, &report_data, command_id);
-		if (ret < 0) {
-			pr_err("%s: failed to get tp data\n", __func__);
-			fpd_dp_ser_unlock_global();
-			return;
-		}
-		tp_ack_irq(priv);
+	if (!fpd_dp_ser_ready() || !READ_ONCE(priv->initialized)) {
 		fpd_dp_ser_unlock_global();
+		pr_info("%s: not ready to handle irq, ready = %d, "
+			"initialized = %d\n",
+			__func__,
+			fpd_dp_ser_ready(),
+			READ_ONCE(priv->initialized));
+		return;
+	}
 
-		if (report_data.command_id != TP_PROTOCOL_COMMAND_ID_TP_REPORT
-		    || report_data.data_length_l != TP_PROTOCOL_DATA_LENGTH_TP_REPORT) {
-			pr_debug("Skip non-tp data\n");
-			continue;
-		}
-		if (report_data.number_points == 0)
-			pr_debug("number of points is zero\n");
+	ret = tp_get_mcu_tp_data(priv, &report_data, command_id);
+	if (ret < 0) {
+		pr_err("%s: failed to get tp data\n", __func__);
+		fpd_dp_ser_unlock_global();
+		return;
+	}
+	tp_ack_irq(priv);
+	fpd_dp_ser_unlock_global();
 
-		for (i = 0; i < report_data.number_points; ++i)
-			process_tp_point_data(&report_data.point_data[i]);
+	if (report_data.command_id != TP_PROTOCOL_COMMAND_ID_TP_REPORT
+		|| report_data.data_length_l != TP_PROTOCOL_DATA_LENGTH_TP_REPORT) {
+		pr_debug("Skip non-tp data\n");
+		return;
+	}
+	if (report_data.number_points == 0)
+		pr_debug("number of points is zero\n");
 
-		ret = tp_input_dev_report(priv, &report_data);
-		if (ret < 0) {
-			pr_err("Failed to report data to input dev\n");
-			break;
-		}
-		--retries;
-		command_id = TP_PROTOCOL_COMMAND_ID_TP_REPORT;
-	} while (retries > 0);
+	for (i = 0; i < report_data.number_points; ++i)
+		process_tp_point_data(&report_data.point_data[i]);
+
+	ret = tp_input_dev_report(priv, &report_data);
+	if (ret < 0)
+		pr_err("failed to report data to input dev\n");
 }
 
 
@@ -462,34 +456,6 @@ static int tp_kthread_polling_create(struct tp_priv *priv)
 }
 
 
-static int tp_i2c_passthrough_init(struct tp_priv *priv)
-{
-	struct i2c_adapter *adapter = priv->i2c_adap;
-	u16 ser_addr = I2C_SER_ADDRESS;
-	int ret = 0;
-
-	ret |= fpd_write_reg_force(adapter, ser_addr, 0x70, I2C_MCU_ADDRESS << 1);
-	ret |= fpd_write_reg_force(adapter, ser_addr, 0x78, I2C_MCU_ADDRESS << 1);
-	ret |= fpd_write_reg_force(adapter, ser_addr, 0x88, 0);
-	ret |= fpd_write_reg_force(adapter, ser_addr, 0x07, 0x88);
-
-	return ret;
-}
-
-
-static int tp_i2c_clock_init(struct tp_priv *priv)
-{
-	struct i2c_adapter *adapter = priv->i2c_adap;
-	u16 addr = I2C_DES_ADDRESS;
-	int ret = 0;
-
-	ret |= fpd_write_reg_force(adapter, addr, 0x2b, 0x0a);
-	ret |= fpd_write_reg_force(adapter, addr, 0x2c, 0x0b);
-
-	return ret;
-}
-
-
 static struct gpiod_lookup_table tp_gpio_table = {
 	.dev_id = NULL,
 	.table = {
@@ -600,24 +566,11 @@ retry:
 	}
 
 	msleep(5000);
-	if (!IS_ERR_OR_NULL(priv->i2c_ser_client)) {
-		ret = tp_i2c_passthrough_init(priv);
-		if (ret) {
-			fpd_dp_ser_unlock_global();
-			pr_err("Failed to enable i2c passthrough\n");
-			return;
-		}
-		pr_debug("i2c passthrough enabled\n");
-	}
-
-	// ret = tp_i2c_clock_init(priv);
-	// if (ret)
-	// 	pr_warn("Failed to enable i2c fast mode\n");
 
 	ret = tp_serdes_irq_init(priv);
 	if (ret < 0) {
 		fpd_dp_ser_unlock_global();
-		pr_err("Failed to initialize TP IRQ\n");
+		pr_err("failed to initialize TP IRQ\n");
 		return;
 	}
 	WRITE_ONCE(priv->initialized, true);
@@ -646,32 +599,12 @@ static int ef1e_tp_probe(struct platform_device *dev)
 	i2c_bus_number = get_bus_number();
 	i2c_adap = i2c_get_adapter(i2c_bus_number);
 	if (!i2c_adap) {
-		pr_err("Cannot find a valid i2c bus for tp\n");
+		pr_err("cannot find a valid i2c bus for tp\n");
 		ret = -ENODEV;
 		goto error;
 	}
 	priv->i2c_adap = i2c_adap;
 
-	priv->i2c_mcu_client = i2c_new_dummy_device(priv->i2c_adap, I2C_MCU_ADDRESS);
-	if (IS_ERR_OR_NULL(priv->i2c_mcu_client) && !force_i2c_communication) {
-		pr_err("Failed to create dummy i2c device for MCU\n");
-		ret = -EBUSY;
-		goto error;
-	}
-
-	priv->i2c_ser_client = i2c_new_dummy_device(priv->i2c_adap, I2C_SER_ADDRESS);
-	if (IS_ERR_OR_NULL(priv->i2c_ser_client) && !force_i2c_communication) {
-		pr_err("Failed to create dummy i2c device for SER\n");
-		ret = -EBUSY;
-		goto error;
-	}
-
-	priv->i2c_des_client = i2c_new_dummy_device(priv->i2c_adap, I2C_DES_ADDRESS);
-	if (IS_ERR_OR_NULL(priv->i2c_des_client) && !force_i2c_communication) {
-		pr_err("Failed to create dummy i2c device for DES\n");
-		ret = -EBUSY;
-		goto error;
-	}
 	priv->init_wq = create_workqueue("ef1e_tp-init-wq");
 	if (IS_ERR_OR_NULL(priv->init_wq)) {
 		dev_err(&dev->dev, "failed to create init wq\n");
@@ -703,11 +636,9 @@ error:
 	} else {
 		tp_gpio_irq_destroy(priv);
 	}
-	i2c_unregister_device(priv->i2c_des_client);
-	i2c_unregister_device(priv->i2c_ser_client);
-	i2c_unregister_device(priv->i2c_mcu_client);
+
 	i2c_put_adapter(priv->i2c_adap);
-	pr_err("Error occurring, initialization is aborted\n");
+	pr_err("error occured, initialization is aborted\n");
 	return ret;
 }
 
@@ -722,9 +653,7 @@ static int ef1e_tp_remove(struct platform_device *dev)
 		tp_gpio_irq_destroy(priv);
 	}
 	destroy_workqueue(priv->init_wq);
-	i2c_unregister_device(priv->i2c_des_client);
-	i2c_unregister_device(priv->i2c_ser_client);
-	i2c_unregister_device(priv->i2c_mcu_client);
+
 	tp_input_dev_destroy(priv);
 	i2c_put_adapter(priv->i2c_adap);
 
