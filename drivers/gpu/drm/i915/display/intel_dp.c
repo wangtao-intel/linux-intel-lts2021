@@ -75,6 +75,7 @@
 #include "intel_tc.h"
 #include "intel_vdsc.h"
 #include "intel_vrr.h"
+#include "../../bridge/ti/fpd_dp_ser_drv.h"
 
 /* DP DSC throughput values used for slice count calculations KPixels/s */
 #define DP_DSC_PEAK_PIXEL_RATE			2720000
@@ -5610,8 +5611,10 @@ static void mcu_set_backlight(const struct drm_connector_state *conn_state, u32 
 
 	u16 data = 0;
 
+	fpd_dp_ser_lock_global();
 	if (deser_reset == 0) {
-		/* TODO: 984 reset to avoid serdes panel black screen,
+		/*
+		 * TODO: 984 reset to avoid serdes panel black screen,
 		 * the following should handle 984 reset accoding to panel
 		 * status
 		 */
@@ -5622,13 +5625,15 @@ static void mcu_set_backlight(const struct drm_connector_state *conn_state, u32 
 	}
 
 	panel->backlight.level = level;
+
+	data = 0x0200 | level;
+	intel_dp_mcu_write_reg(dev, i2c_adap_mcu, 0x22, data);
+	fpd_dp_ser_unlock_global();
+
 	drm_dbg_kms(dev,
 		"[CONNECTOR:%d:%s] level = 0x%2x\n",
 		to_intel_connector(conn_state->connector)->base.base.id,
 		to_intel_connector(conn_state->connector)->base.name, level);
-
-	data = 0x0200 | level;
-	intel_dp_mcu_write_reg(dev, i2c_adap_mcu, 0x22, data);
 }
 
 static void mcu_disable_backlight(const struct drm_connector_state *conn_state, u32 level)
