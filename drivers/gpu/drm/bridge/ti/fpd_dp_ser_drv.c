@@ -1859,7 +1859,7 @@ bool fpd_dp_ser_init(void)
 	/* Check if VP is synchronized to DP input */
 	fpd_poll_984_training();
 
-	deser_reset = 0;
+	WRITE_ONCE(deser_reset, 0);
 
 	fpd_dp_ser_set_up_mcu(fpd_dp_priv->priv_dp_client[0]);
 
