@@ -30,6 +30,8 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 
+#include "../../../gpu/drm/bridge/ti/fpd_dp_ser_drv.h"
+
 #include "ef1e_tp.h"
 #include "ef1e_tp_input.h"
 #include "ef1e_tp_protocol.h"
@@ -43,15 +45,18 @@
 #define EF1E_TP_PLATFORM_DEV_NAME		"ef1e_tp"
 
 /* Set polling to non-zero to enable polling mode for touchscreen data. */
-static int polling;
+static int polling = 0;
 module_param(polling, int, 0);
 
 /* Force to go on even if we fail to create i2c dummy devices. */
 static int force_i2c_communication = 1;
 module_param(force_i2c_communication, int, 0);
 
-static int revert = true;
+static int revert = 1;
 module_param(revert, int, 0);
+
+static int ack_thread = 0;
+module_param(ack_thread, int, 0);
 
 static struct tp_priv global_tp;
 
@@ -232,14 +237,14 @@ int tp_get_mcu_tp_data(struct tp_priv *priv, struct tp_report_data *buff, u8 com
 
 	ret = i2c_transfer(adapter, msg, 2);
 	if (ret < 0) {
-		pr_err("Failed to transfer data\n");
+		pr_err("failed to transfer data\n");
 		return -1;
 	}
 
 	return 0;
 }
 
-
+/* Usually we don't care about the result this function returns, but who knows */
 static int tp_ack_irq(struct tp_priv *priv)
 {
 	struct i2c_adapter *adapter = priv->i2c_adap;
@@ -273,7 +278,6 @@ static int process_tp_point_data(struct tp_point_data *data)
 	return 0;
 }
 
-
 static void tp_irq_work(struct tp_priv *priv)
 {
 	struct tp_report_data report_data;
@@ -283,11 +287,26 @@ static void tp_irq_work(struct tp_priv *priv)
 	do {
 		pr_debug("%s: Try to obtain tp data\n", __func__);
 
-		ret = tp_get_mcu_tp_data(priv, &report_data, command_id);
-		if (ret < 0) {
-			pr_err("Failed to transfer data\n");
+		fpd_dp_ser_lock_global();
+
+		if (!fpd_dp_ser_ready() || !READ_ONCE(priv->initialized)) {
+			fpd_dp_ser_unlock_global();
+			pr_info("%s: not ready to handle irq, ready = %d, "
+				"initialized = %d\n",
+				__func__,
+				fpd_dp_ser_ready(),
+				READ_ONCE(priv->initialized));
 			return;
 		}
+
+		ret = tp_get_mcu_tp_data(priv, &report_data, command_id);
+		if (ret < 0) {
+			pr_err("%s: failed to get tp data\n", __func__);
+			fpd_dp_ser_unlock_global();
+			return;
+		}
+		tp_ack_irq(priv);
+		fpd_dp_ser_unlock_global();
 
 		if (report_data.command_id != TP_PROTOCOL_COMMAND_ID_TP_REPORT
 		    || report_data.data_length_l != TP_PROTOCOL_DATA_LENGTH_TP_REPORT) {
@@ -307,7 +326,6 @@ static void tp_irq_work(struct tp_priv *priv)
 		}
 		--retries;
 		command_id = TP_PROTOCOL_COMMAND_ID_TP_REPORT;
-		tp_ack_irq(priv);
 	} while (retries > 0);
 }
 
@@ -324,14 +342,26 @@ static irqreturn_t tp_irq_handler(int irq, void *arg)
 }
 
 
+/*
+ * We might accidentally miss interrupt from the MCU and if that happen, we
+ * won't get informed of any interrupt any more.  To break out from this dead
+ * lock, we periodically acknowledge the MCU.
+ */
 int tp_kthread_ack(void *data)
 {
 	struct tp_priv *priv = data;
 
 	pr_debug("%s: kthread started\n", __func__);
 	while (!kthread_should_stop()) {
-		tp_ack_irq(priv);
-		msleep(50);
+		fpd_dp_ser_lock_global();
+		if (fpd_dp_ser_ready() && READ_ONCE(priv->initialized))
+			tp_ack_irq(priv);
+		else
+			pr_debug("%s: skip ack, ready = %d, initialized = %d\n",
+				__func__, fpd_dp_ser_ready(),
+				READ_ONCE(priv->initialized));
+		fpd_dp_ser_unlock_global();
+		msleep(500);
 	}
 	pr_debug("%s: kthread stopped\n", __func__);
 	return 0;
@@ -351,11 +381,20 @@ int tp_kthread_polling(void *data)
 
 	pr_debug("%s: kthread started\n", __func__);
 	while (!kthread_should_stop()) {
+		fpd_dp_ser_lock_global();
+
+		if (!fpd_dp_ser_ready()) {
+			fpd_dp_ser_unlock_global();
+			msleep(50);
+			continue;
+		}
+
 		tp_ack_irq(priv);
 		ret = tp_get_mcu_tp_data(priv, curr, TP_PROTOCOL_COMMAND_ID_TP_REPORT);
+		fpd_dp_ser_unlock_global();
+
 		memcpy(&effective, curr, sizeof(struct tp_report_data));
 		report_data = (struct tp_report_data *) &effective;
-
 		swap(curr, prev);
 		if (report_data->command_id != TP_PROTOCOL_COMMAND_ID_TP_REPORT ||
 		    report_data->data_length_l != TP_PROTOCOL_DATA_LENGTH_TP_REPORT) {
@@ -411,7 +450,8 @@ static int tp_kthread_ack_create(struct tp_priv *priv)
 
 static int tp_kthread_polling_create(struct tp_priv *priv)
 {
-	priv->polling_kthread = kthread_create(tp_kthread_polling, priv, "ef1e-tp-polling");
+	priv->polling_kthread = kthread_create(tp_kthread_polling, priv,
+					       "ef1e-tp-polling");
 	if (!priv->polling_kthread) {
 		pr_err("Failed to create kthread\n");
 		return -ENOMEM;
@@ -475,7 +515,7 @@ static int tp_gpio_irq_init(struct tp_priv *priv)
 	}
 	priv->tp_irq = gpiod_to_irq(priv->tp_gpio);
 	if (priv->tp_irq <= 0) {
-		pr_err("Failed to get IRQ\n");
+		pr_err("failed to get IRQ\n");
 		return -EBUSY;
 	}
 	pr_debug("TP irq = %d\n", priv->tp_irq);
@@ -483,14 +523,21 @@ static int tp_gpio_irq_init(struct tp_priv *priv)
 				   NULL, tp_irq_handler,
 				   IRQF_TRIGGER_FALLING |
 				   IRQF_ONESHOT,
-				   "tp-irq", priv);
+				   "ef1e_tp-irq", priv);
 	if (ret) {
 		pr_err("Failed to request edge IRQ for TP\n");
 		return ret;
 	}
 	pr_debug("irq handler installed\n");
 
-	ret = tp_kthread_ack_create(priv);
+	if (ack_thread) {
+		ret = tp_kthread_ack_create(priv);
+		if (ret) {
+			pr_err("%s: failed to create ack thread\n", __func__);
+			free_irq(priv->tp_irq, priv);
+		}
+	}
+
 	return ret;
 }
 
@@ -499,14 +546,15 @@ static void tp_gpio_irq_destroy(struct tp_priv *priv)
 {
 	if (priv->tp_irq > 0)
 		free_irq(priv->tp_irq, priv);
+	if (priv->ack_kthread)
+		kthread_stop(priv->ack_kthread);
 	if (!IS_ERR_OR_NULL(priv->tp_gpio)) {
 		gpio_free(desc_to_gpio(priv->tp_gpio));
 		gpiod_remove_lookup_table(&tp_gpio_table);
 	}
-	if (priv->ack_kthread)
-		kthread_stop(priv->ack_kthread);
 }
 
+/* Setup GPIO interrupt for serdes. */
 static int tp_serdes_irq_init(struct tp_priv *priv)
 {
 	struct i2c_adapter *adapter = priv->i2c_adap;
@@ -537,10 +585,54 @@ static int tp_serdes_irq_init(struct tp_priv *priv)
 }
 
 
+static void tp_init_work(struct work_struct *work)
+{
+	struct tp_priv *priv = &global_tp;
+	int ret;
+
+retry:
+	fpd_dp_ser_lock_global();
+	if (!fpd_dp_ser_ready()) {
+		fpd_dp_ser_unlock_global();
+		pr_info("%s: not ready, wait for 50ms\n", __func__);
+		msleep(50);
+		goto retry;
+	}
+
+	msleep(5000);
+	if (!IS_ERR_OR_NULL(priv->i2c_ser_client)) {
+		ret = tp_i2c_passthrough_init(priv);
+		if (ret) {
+			fpd_dp_ser_unlock_global();
+			pr_err("Failed to enable i2c passthrough\n");
+			return;
+		}
+		pr_debug("i2c passthrough enabled\n");
+	}
+
+	// ret = tp_i2c_clock_init(priv);
+	// if (ret)
+	// 	pr_warn("Failed to enable i2c fast mode\n");
+
+	ret = tp_serdes_irq_init(priv);
+	if (ret < 0) {
+		fpd_dp_ser_unlock_global();
+		pr_err("Failed to initialize TP IRQ\n");
+		return;
+	}
+	WRITE_ONCE(priv->initialized, true);
+	pr_info("%s: set initialized to true\n", __func__);
+	/* Tick off the MCU to start reporting IRQ. */
+	tp_ack_irq(priv);
+	fpd_dp_ser_unlock_global();
+}
+
+
 static void tp_priv_init(struct tp_priv *priv)
 {
 	memset(priv, 0, sizeof(struct tp_priv));
 	priv->polling = polling;
+	INIT_WORK(&priv->init_work, tp_init_work);
 }
 
 
@@ -552,7 +644,6 @@ static int ef1e_tp_probe(struct platform_device *dev)
 	struct tp_priv *priv = &global_tp;
 
 	i2c_bus_number = get_bus_number();
-	pr_info("i2c bus number = %d\n", i2c_bus_number);
 	i2c_adap = i2c_get_adapter(i2c_bus_number);
 	if (!i2c_adap) {
 		pr_err("Cannot find a valid i2c bus for tp\n");
@@ -581,27 +672,19 @@ static int ef1e_tp_probe(struct platform_device *dev)
 		ret = -EBUSY;
 		goto error;
 	}
-
-	if (!IS_ERR_OR_NULL(priv->i2c_ser_client)) {
-		ret = tp_i2c_passthrough_init(priv);
-		if (ret) {
-			pr_err("Failed to enable i2c passthrough\n");
-			goto error;
-		}
-		pr_debug("i2c passthrough enabled\n");
-	}
-
-	ret = tp_i2c_clock_init(priv);
-	if (ret)
-		pr_warn("Failed to enable i2c fast mode\n");
-
-	ret = tp_serdes_irq_init(priv);
-	if (ret < 0) {
-		pr_err("Failed to initialize TP IRQ\n");
+	priv->init_wq = create_workqueue("ef1e_tp-init-wq");
+	if (IS_ERR_OR_NULL(priv->init_wq)) {
+		dev_err(&dev->dev, "failed to create init wq\n");
+		ret = -ENOMEM;
 		goto error;
 	}
-	/* Tick off the MCU to start reporting IRQ. */
-	tp_ack_irq(priv);
+	queue_work(priv->init_wq, &priv->init_work);
+
+	ret = tp_input_dev_init(priv);
+	if (ret < 0) {
+		pr_err("Failed to initialize input device\n");
+		goto error;
+	}
 
 	if (priv->polling)
 		ret = tp_kthread_polling_create(priv);
@@ -610,12 +693,7 @@ static int ef1e_tp_probe(struct platform_device *dev)
 	if (ret < 0)
 		goto error;
 
-	ret = tp_input_dev_init(priv);
-	if (ret < 0) {
-		pr_err("Failed to initialize input device\n");
-		goto error;
-	}
-	pr_debug("%s(): done\n", __func__);
+	pr_info("%s(): done\n", __func__);
 	return 0;
 
 error:
@@ -643,6 +721,7 @@ static int ef1e_tp_remove(struct platform_device *dev)
 	} else {
 		tp_gpio_irq_destroy(priv);
 	}
+	destroy_workqueue(priv->init_wq);
 	i2c_unregister_device(priv->i2c_des_client);
 	i2c_unregister_device(priv->i2c_ser_client);
 	i2c_unregister_device(priv->i2c_mcu_client);
@@ -653,12 +732,52 @@ static int ef1e_tp_remove(struct platform_device *dev)
 	return 0;
 }
 
+
+static int ef1e_tp_resume(struct device *dev)
+{
+	struct tp_priv *priv = &global_tp;
+	int ret;
+
+	queue_work(priv->init_wq, &priv->init_work);
+
+	if (priv->polling)
+		ret = tp_kthread_polling_create(priv);
+	else
+		ret = tp_gpio_irq_init(priv);
+
+	return ret;
+}
+
+
+static int ef1e_tp_suspend(struct device *dev)
+{
+	struct tp_priv *priv = &global_tp;
+	int ret;
+
+	WRITE_ONCE(priv->initialized, 0);
+	dev_info(dev, "%s: set initialized to false\n", __func__);
+	if (priv->polling) {
+		if (priv->polling_kthread)
+			kthread_stop(priv->polling_kthread);
+	} else {
+		tp_gpio_irq_destroy(priv);
+	}
+	return 0;
+}
+
+
+static const struct dev_pm_ops ef1e_tp_pm_ops = {
+	.suspend = ef1e_tp_suspend,
+	.resume	= ef1e_tp_resume,
+};
+
 static struct platform_driver ef1e_tp_driver = {
 	.probe = ef1e_tp_probe,
 	.remove = ef1e_tp_remove,
 	.driver = {
 		.name = EF1E_TP_PLATFORM_DEV_NAME,
 		.owner = THIS_MODULE,
+		.pm = &ef1e_tp_pm_ops,
 	},
 };
 
@@ -672,14 +791,17 @@ static int __init tp_driver_init(void)
 	priv->dev = platform_device_register_simple(EF1E_TP_PLATFORM_DEV_NAME,
 							-1, NULL, 0);
 	if (IS_ERR_OR_NULL(priv->dev)) {
+		pr_err("failed to register platform device\n");
 		ret = PTR_ERR(priv->dev);
 		return ret;
 	}
 	ret = platform_driver_probe(&ef1e_tp_driver, ef1e_tp_probe);
 	if (ret) {
+		dev_err(&priv->dev->dev, "failed to probe driver\n");
 		platform_device_unregister(priv->dev);
 		return ret;
 	}
+	dev_info(&priv->dev->dev, "ef1e_tp driver loaded\n");
 	return 0;
 }
 
