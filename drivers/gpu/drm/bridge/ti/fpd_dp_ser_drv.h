@@ -70,6 +70,7 @@ void fpd_dp_ser_module_exit(void);
 int fpd_dp_ser_module_init(void);
 
 bool fpd_dp_ser_init(void);
+int fpd_dp_ser_get_i2c_bus_number(void);
 
 bool fpd_dp_ser_ready(void);
 void fpd_dp_ser_set_ready(bool);

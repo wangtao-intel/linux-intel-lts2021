@@ -1843,12 +1843,13 @@ static int intel_get_i2c_bus_id(int adapter_id, char *adapter_bdf, int bdf_len)
 	return -1;
 }
 
-static int get_bus_number(void)
+int fpd_dp_ser_get_i2c_bus_number(void)
 {
 	char adapter_bdf[32] = ADAPTER_PP_DEV_NAME;
 	int bus_number = intel_get_i2c_bus_id(0, adapter_bdf, 32);
 	return bus_number;
 }
+EXPORT_SYMBOL_GPL(fpd_dp_ser_get_i2c_bus_number);
 
 bool fpd_dp_ser_init(void)
 {
@@ -1898,7 +1899,7 @@ static int fpd_dp_ser_probe(struct platform_device *pdev)
 	memset(priv, 0, sizeof(*priv));
 	priv->dev = &pdev->dev;
 
-	bus_number = get_bus_number();
+	bus_number = fpd_dp_ser_get_i2c_bus_number();
 	fpd_dp_ser_debug("Use bus_number %d \n", bus_number);
 	i2c_adap = i2c_get_adapter(bus_number);
 	if (!i2c_adap) {
