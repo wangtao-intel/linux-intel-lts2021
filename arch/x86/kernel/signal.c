@@ -10,43 +10,6 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/sched.h>
-#include <linux/sched/task_stack.h>
-#include <linux/mm.h>
-#include <linux/smp.h>
-#include <linux/kernel.h>
-#include <linux/errno.h>
-#include <linux/wait.h>
-#include <linux/tracehook.h>
-#include <linux/unistd.h>
-#include <linux/stddef.h>
-#include <linux/personality.h>
-#include <linux/uaccess.h>
-#include <linux/user-return-notifier.h>
-#include <linux/uprobes.h>
-#include <linux/context_tracking.h>
-#include <linux/entry-common.h>
-#include <linux/syscalls.h>
-
-#include <asm/processor.h>
-#include <asm/ucontext.h>
-#include <asm/fpu/internal.h>
-#include <asm/fpu/signal.h>
-#include <asm/vdso.h>
-#include <asm/mce.h>
-#include <asm/sighandling.h>
-#include <asm/vm86.h>
-
-#ifdef CONFIG_X86_64
-#include <linux/compat.h>
-#include <asm/proto.h>
-#include <asm/ia32_unistd.h>
-#endif /* CONFIG_X86_64 */
-
-#include <asm/syscall.h>
-#include <asm/sigframe.h>
-#include <asm/signal.h>
-
 #ifdef CONFIG_X86_64
 /*
  * If regs->ss will cause an IRET fault, change it.  Otherwise leave it
