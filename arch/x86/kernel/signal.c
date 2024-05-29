@@ -84,12 +84,17 @@ static int restore_sigcontext(struct pt_regs *regs,
 			      unsigned long uc_flags)
 {
 	struct sigcontext sc;
-
+	bool cret;
 	/* Always make any pending restarted system calls return -EINTR */
 	current->restart_block.fn = do_no_restart_syscall;
+	
+	pr_info("IBT.restore_sigcontext usc: %px & size: %d\n",usc, CONTEXT_COPY_SIZE);
 
-	if (copy_from_user(&sc, usc, CONTEXT_COPY_SIZE))
-		return -EFAULT;
+        if (copy_from_user(&sc, usc, CONTEXT_COPY_SIZE)){
+               pr_info("IBT.restore_sigcontext sc: %px \n",&sc);
+               return -EFAULT;
+
+        }
 
 #ifdef CONFIG_X86_32
 	set_user_gs(regs, sc.gs);
@@ -136,8 +141,16 @@ static int restore_sigcontext(struct pt_regs *regs,
 		force_valid_ss(regs);
 #endif
 
-	return fpu__restore_sig((void __user *)sc.fpstate,
-			       IS_ENABLED(CONFIG_X86_32));
+	//return fpu__restore_sig((void __user *)sc.fpstate,
+	//		       IS_ENABLED(CONFIG_X86_32));
+	pr_info("IBT.restore_sigcontext sc.fpstate: %lx\n", (void __user *)sc.fpstate);
+
+        cret = fpu__restore_sig((void __user *)sc.fpstate,
+                               IS_ENABLED(CONFIG_X86_32));
+
+        pr_info("IBT.restore_sigcontext cret %d\n", cret);
+
+        return cret;
 }
 
 static __always_inline int
@@ -662,6 +675,11 @@ SYSCALL_DEFINE0(rt_sigreturn)
 	unsigned long uc_flags;
 
 	frame = (struct rt_sigframe __user *)(regs->sp - sizeof(long));
+
+        pr_info("IBT.rt_sigreturn: fpstate %lx\n", frame->uc.uc_mcontext.fpstate);
+        pr_info("IBT.rt_sigreturn: regs IP: %lx, SP: %lx, BP: %lx\n", regs->ip, regs->sp, regs->bp);
+        pr_info("IBT.rt_sigreturn: frame: %px\n", frame);
+
 	if (!access_ok(frame, sizeof(*frame)))
 		goto badframe;
 	if (__get_user(*(__u64 *)&set, (__u64 __user *)&frame->uc.uc_sigmask))
@@ -671,9 +689,10 @@ SYSCALL_DEFINE0(rt_sigreturn)
 
 	set_current_blocked(&set);
 
-	if (restore_sigcontext(regs, &frame->uc.uc_mcontext, uc_flags))
+	if (restore_sigcontext(regs, &frame->uc.uc_mcontext, uc_flags)){ 
+		pr_info("IBT.rt_sigreturn: !restore_sigcontext uc_flags %lu\n", (unsigned long)uc_flags);
 		goto badframe;
-
+	}
 	if (restore_altstack(&frame->uc.uc_stack))
 		goto badframe;
 

@@ -46,8 +46,14 @@ static inline int check_xstate_in_sigframe(struct fxregs_state __user *fxbuf,
 	 * fpstate layout with out copying the extended state information
 	 * in the memory layout.
 	 */
-	if (__get_user(magic2, (__u32 __user *)(fpstate + fx_sw->xstate_size)))
-		return -EFAULT;
+        __u32 __user *val = (__u32 __user *)(fpstate + fx_sw->xstate_size);
+
+        pr_info("IBT.check_xstate_in_sigframe (fpstate + fx_sw->xstate_size): %u\n", *val);
+
+        if (__get_user(magic2, (__u32 __user *)(fpstate + fx_sw->xstate_size))){
+                pr_info("IBT.check_xstate_in_sigframe __get_user.magic2 %d\n", magic2);
+                return -EFAULT;
+        }
 
 	if (likely(magic2 == FP_XSTATE_MAGIC2))
 		return 0;
@@ -332,6 +338,7 @@ static int __fpu_restore_sig(void __user *buf, void __user *buf_fx,
 		 * faults. If it does, fall back to the slow path below, going
 		 * through the kernel buffer with the enabled pagefault handler.
 		 */
+		pr_info("IBT.__fpu_restore_sig restore_fpregs_from_user\n");
 		return restore_fpregs_from_user(buf_fx, user_xfeatures, fx_only,
 						state_size);
 	}
@@ -466,6 +473,7 @@ int fpu__restore_sig(void __user *buf, int ia32_frame)
 				      NULL, buf);
 	} else {
 		ret = __fpu_restore_sig(buf, buf_fx, ia32_fxstate);
+		pr_info("IBT.fpu__restore_sig s: %d\n", ret);
 	}
 
 out:
