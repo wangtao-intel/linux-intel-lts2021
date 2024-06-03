@@ -663,20 +663,32 @@ SYSCALL_DEFINE0(rt_sigreturn)
 
 	frame = (struct rt_sigframe __user *)(regs->sp - sizeof(long));
 	if (!access_ok(frame, sizeof(*frame)))
+	{
+		pr_info("IBT.rt_sigreturn frame: %px\n", frame);
 		goto badframe;
+	}
 	if (__get_user(*(__u64 *)&set, (__u64 __user *)&frame->uc.uc_sigmask))
+	{	
+		pr_info("IBT.rt_sigreturn __get_user(*(__u64 *)&set, (__u64 __user *)&frame->uc.uc_sigmask)");
 		goto badframe;
+	}
 	if (__get_user(uc_flags, &frame->uc.uc_flags))
+	{
+		pr_info("IBT.rt_sigreturn __get_user(uc_flags, &frame->uc.uc_flags)");
 		goto badframe;
-
+	}
 	set_current_blocked(&set);
 
 	if (restore_sigcontext(regs, &frame->uc.uc_mcontext, uc_flags))
+	{
+		pr_info("IBT.restore_sigcontext 1 uc_flags %lu\n", (unsigned long)uc_flags);
 		goto badframe;
-
+	}
 	if (restore_altstack(&frame->uc.uc_stack))
+	{
+		pr_info("IBT.restore_sigcontext 2");
 		goto badframe;
-
+	}
 	return regs->ax;
 
 badframe:
