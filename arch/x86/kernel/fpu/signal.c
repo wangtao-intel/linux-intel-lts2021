@@ -46,8 +46,10 @@ static inline int check_xstate_in_sigframe(struct fxregs_state __user *fxbuf,
 	 * fpstate layout with out copying the extended state information
 	 * in the memory layout.
 	 */
-	if (__get_user(magic2, (__u32 __user *)(fpstate + fx_sw->xstate_size)))
-		return -EFAULT;
+        if (__get_user(magic2, (__u32 __user *)(fpstate + fx_sw->xstate_size))){
+                pr_info("IBT.check_xstate_in_sigframe __get_user.magic2 %d\n", magic2);
+                return -EFAULT;
+        }
 
 	if (likely(magic2 == FP_XSTATE_MAGIC2))
 		return 0;
@@ -223,22 +225,40 @@ retry:
 static int __restore_fpregs_from_user(void __user *buf, u64 xrestore,
 				      bool fx_only)
 {
+	int cret;
 	if (use_xsave()) {
 		u64 init_bv = xfeatures_mask_uabi() & ~xrestore;
 		int ret;
 
-		if (likely(!fx_only))
+		if (likely(!fx_only)){
 			ret = xrstor_from_user_sigframe(buf, xrestore);
-		else
+			if(ret)
+				pr_info("IBT.__restore_fpregs_from_user ,fx_only is false ,xrstor_from_user_sigframe ,ret is %d\n",ret);
+		}
+		else{
 			ret = fxrstor_from_user_sigframe(buf);
-
+			if(ret)
+                                pr_info("IBT.__restore_fpregs_from_user ,fx_only is true, fxrstor_from_user_sigframe ,ret is %d\n",ret);
+		}
 		if (!ret && unlikely(init_bv))
 			os_xrstor(&init_fpstate.xsave, init_bv);
+		if (ret)
+		{
+			pr_info("IBT.__restore_fpregs_from_user ,ret is %d\n",ret);
+		}
 		return ret;
 	} else if (use_fxsr()) {
-		return fxrstor_from_user_sigframe(buf);
+		cret = fxrstor_from_user_sigframe(buf);
+		if (cret)
+			pr_info("IBT.__restore_fpregs_from_user, fxrstor_from_user_sigframe is %d\n",cret);
+		return cret;
+
 	} else {
-		return frstor_from_user_sigframe(buf);
+		cret = frstor_from_user_sigframe(buf);
+		if (cret)
+                        pr_info("IBT.__restore_fpregs_from_user, frstor_from_user_sigframe is %d\n",cret);
+		return cret;
+
 	}
 }
 
@@ -270,6 +290,7 @@ retry:
 		 * might preempt current and return to user space with
 		 * corrupted FPU registers.
 		 */
+		pr_info("IBT.restore_fpregs_from_user, ret is %d, fx_only is %d\n, true is 1", ret, fx_only);
 		if (test_thread_flag(TIF_NEED_FPU_LOAD))
 			__cpu_invalidate_fpregs_state();
 		fpregs_unlock();
@@ -310,14 +331,17 @@ static int __fpu_restore_sig(void __user *buf, void __user *buf_fx,
 	u64 user_xfeatures = 0;
 	bool fx_only = false;
 	int ret;
+	int cret;
 
 	if (use_xsave()) {
 		struct _fpx_sw_bytes fx_sw_user;
 
 		ret = check_xstate_in_sigframe(buf_fx, &fx_sw_user);
 		if (unlikely(ret))
+		{	
+			pr_info("IBT.__fpu_restore_sig, check_xstate_in_sigframe ret is %d\n", ret);
 			return ret;
-
+		}
 		fx_only = !fx_sw_user.magic1;
 		state_size = fx_sw_user.xstate_size;
 		user_xfeatures = fx_sw_user.xfeatures;
@@ -332,8 +356,11 @@ static int __fpu_restore_sig(void __user *buf, void __user *buf_fx,
 		 * faults. If it does, fall back to the slow path below, going
 		 * through the kernel buffer with the enabled pagefault handler.
 		 */
-		return restore_fpregs_from_user(buf_fx, user_xfeatures, fx_only,
+		cret =  restore_fpregs_from_user(buf_fx, user_xfeatures, fx_only,
 						state_size);
+		if (cret != 0)
+			pr_info("IBT.__fpu_restore_sig, restore_fpregs_from_user\n");
+		return cret;
 	}
 
 	/*
@@ -342,9 +369,10 @@ static int __fpu_restore_sig(void __user *buf, void __user *buf_fx,
 	 * in once the larger state has been copied.
 	 */
 	ret = __copy_from_user(&env, buf, sizeof(env));
-	if (ret)
+	if (ret){
+		pr_info("IBT.__fpu_restore_sig, __copy_from_user\n");
 		return ret;
-
+	}
 	/*
 	 * By setting TIF_NEED_FPU_LOAD it is ensured that our xstate is
 	 * not modified on context switch and that the xstate is considered
@@ -372,16 +400,24 @@ static int __fpu_restore_sig(void __user *buf, void __user *buf_fx,
 	if (use_xsave() && !fx_only) {
 		ret = copy_sigframe_from_user_to_xstate(tsk, buf_fx);
 		if (ret)
+		{	
+			pr_info("IBT.__fpu_restore_sig, copy_sigframe_from_user_to_xstate ret : %d\n", ret);
 			return ret;
+		}
 	} else {
 		if (__copy_from_user(&fpu->state.fxsave, buf_fx,
 				     sizeof(fpu->state.fxsave)))
+		{	
+			pr_info("IBT.__fpu_restore_sig, EFAULT");
 			return -EFAULT;
-
+		}
 		if (IS_ENABLED(CONFIG_X86_64)) {
 			/* Reject invalid MXCSR values. */
 			if (fpu->state.fxsave.mxcsr & ~mxcsr_feature_mask)
+			{	
+				pr_info("IBT.__fpu_restore_sig, EINVAL");
 				return -EINVAL;
+			}
 		} else {
 			/* Mask invalid bits out for historical reasons (broken hardware). */
 			fpu->state.fxsave.mxcsr &= mxcsr_feature_mask;
@@ -410,13 +446,19 @@ static int __fpu_restore_sig(void __user *buf, void __user *buf_fx,
 
 		fpu->state.xsave.header.xfeatures &= mask;
 		ret = os_xrstor_safe(&fpu->state.xsave, xfeatures_mask_all);
+		if (ret)
+			pr_info("IBT.__fpu_restore_sig, os_xrstor_safe, ret:%d\n",ret);
 	} else {
 		ret = fxrstor_safe(&fpu->state.fxsave);
+		if (ret)
+			pr_info("IBT.__fpu_restore_sig, fxrstor_safe, ret:%d\n",ret);
 	}
 
 	if (likely(!ret))
 		fpregs_mark_activate();
-
+	
+	if (ret)
+		pr_info("IBT.__fpu_restore_sig, last ret:%d\n",ret);
 	fpregs_unlock();
 	return ret;
 }
@@ -470,7 +512,10 @@ int fpu__restore_sig(void __user *buf, int ia32_frame)
 
 out:
 	if (unlikely(ret))
+	{	
+		pr_info("IBT.fpu__restore_sig, ret is %d\n",ret);
 		fpu__clear_user_states(fpu);
+	}
 	return ret;
 }
 

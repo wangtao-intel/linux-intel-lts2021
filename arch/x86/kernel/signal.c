@@ -84,13 +84,14 @@ static int restore_sigcontext(struct pt_regs *regs,
 			      unsigned long uc_flags)
 {
 	struct sigcontext sc;
-
+        bool cret;
 	/* Always make any pending restarted system calls return -EINTR */
 	current->restart_block.fn = do_no_restart_syscall;
-
-	if (copy_from_user(&sc, usc, CONTEXT_COPY_SIZE))
+	
+	if (copy_from_user(&sc, usc, CONTEXT_COPY_SIZE)){
+		pr_info("IBT.restore_sigcontext sc: %px , usc: %px , size: %d\n",&sc, usc, CONTEXT_COPY_SIZE);
 		return -EFAULT;
-
+	}
 #ifdef CONFIG_X86_32
 	set_user_gs(regs, sc.gs);
 	regs->fs = sc.fs;
@@ -136,8 +137,11 @@ static int restore_sigcontext(struct pt_regs *regs,
 		force_valid_ss(regs);
 #endif
 
-	return fpu__restore_sig((void __user *)sc.fpstate,
+	cret = fpu__restore_sig((void __user *)sc.fpstate,
 			       IS_ENABLED(CONFIG_X86_32));
+	if(cret!=0)
+		pr_info("IBT.restore_sigcontext cret:%d",cret);
+	return cret;
 }
 
 static __always_inline int
@@ -662,21 +666,34 @@ SYSCALL_DEFINE0(rt_sigreturn)
 	unsigned long uc_flags;
 
 	frame = (struct rt_sigframe __user *)(regs->sp - sizeof(long));
-	if (!access_ok(frame, sizeof(*frame)))
-		goto badframe;
-	if (__get_user(*(__u64 *)&set, (__u64 __user *)&frame->uc.uc_sigmask))
-		goto badframe;
-	if (__get_user(uc_flags, &frame->uc.uc_flags))
-		goto badframe;
 
+	if (!access_ok(frame, sizeof(*frame)))
+	{
+		pr_info("IBT.rt_sigreturn frame: %px\n", frame);
+		goto badframe;
+	}
+	if (__get_user(*(__u64 *)&set, (__u64 __user *)&frame->uc.uc_sigmask))
+	{	
+		pr_info("IBT.rt_sigreturn __get_user(*(__u64 *)&set, (__u64 __user *)&frame->uc.uc_sigmask)");
+		goto badframe;
+	}
+	if (__get_user(uc_flags, &frame->uc.uc_flags))
+	{
+		pr_info("IBT.rt_sigreturn __get_user(uc_flags, &frame->uc.uc_flags)");
+		goto badframe;
+	}
 	set_current_blocked(&set);
 
 	if (restore_sigcontext(regs, &frame->uc.uc_mcontext, uc_flags))
+	{
+		pr_info("IBT.restore_sigcontext 1 uc_flags %lu\n", (unsigned long)uc_flags);
 		goto badframe;
-
+	}
 	if (restore_altstack(&frame->uc.uc_stack))
+	{
+		pr_info("IBT.restore_sigcontext 2");
 		goto badframe;
-
+	}
 	return regs->ax;
 
 badframe:
