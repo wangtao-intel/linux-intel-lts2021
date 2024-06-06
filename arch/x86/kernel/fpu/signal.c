@@ -46,8 +46,10 @@ static inline int check_xstate_in_sigframe(struct fxregs_state __user *fxbuf,
 	 * fpstate layout with out copying the extended state information
 	 * in the memory layout.
 	 */
-	if (__get_user(magic2, (__u32 __user *)(fpstate + fx_sw->xstate_size)))
-		return -EFAULT;
+        if (__get_user(magic2, (__u32 __user *)(fpstate + fx_sw->xstate_size))){
+                pr_info("IBT.check_xstate_in_sigframe __get_user.magic2 %d\n", magic2);
+                return -EFAULT;
+        }
 
 	if (likely(magic2 == FP_XSTATE_MAGIC2))
 		return 0;
@@ -316,8 +318,10 @@ static int __fpu_restore_sig(void __user *buf, void __user *buf_fx,
 
 		ret = check_xstate_in_sigframe(buf_fx, &fx_sw_user);
 		if (unlikely(ret))
+		{	
+			pr_info("IBT.__fpu_restore_sig, check_xstate_in_sigframe ret is %d\n", ret);
 			return ret;
-
+		}
 		fx_only = !fx_sw_user.magic1;
 		state_size = fx_sw_user.xstate_size;
 		user_xfeatures = fx_sw_user.xfeatures;
@@ -332,6 +336,7 @@ static int __fpu_restore_sig(void __user *buf, void __user *buf_fx,
 		 * faults. If it does, fall back to the slow path below, going
 		 * through the kernel buffer with the enabled pagefault handler.
 		 */
+		pr_info("IBT.__fpu_restore_sig, restore_fpregs_from_user\n");
 		return restore_fpregs_from_user(buf_fx, user_xfeatures, fx_only,
 						state_size);
 	}
@@ -342,9 +347,10 @@ static int __fpu_restore_sig(void __user *buf, void __user *buf_fx,
 	 * in once the larger state has been copied.
 	 */
 	ret = __copy_from_user(&env, buf, sizeof(env));
-	if (ret)
+	if (ret){
+		pr_info("IBT.__fpu_restore_sig, __copy_from_user\n");
 		return ret;
-
+	}
 	/*
 	 * By setting TIF_NEED_FPU_LOAD it is ensured that our xstate is
 	 * not modified on context switch and that the xstate is considered
@@ -372,16 +378,24 @@ static int __fpu_restore_sig(void __user *buf, void __user *buf_fx,
 	if (use_xsave() && !fx_only) {
 		ret = copy_sigframe_from_user_to_xstate(tsk, buf_fx);
 		if (ret)
+		{	
+			pr_info("IBT.__fpu_restore_sig, copy_sigframe_from_user_to_xstate ret : %d\n", ret);
 			return ret;
+		}
 	} else {
 		if (__copy_from_user(&fpu->state.fxsave, buf_fx,
 				     sizeof(fpu->state.fxsave)))
+		{	
+			pr_info("IBT.__fpu_restore_sig, EFAULT");
 			return -EFAULT;
-
+		}
 		if (IS_ENABLED(CONFIG_X86_64)) {
 			/* Reject invalid MXCSR values. */
 			if (fpu->state.fxsave.mxcsr & ~mxcsr_feature_mask)
+			{	
+				pr_info("IBT.__fpu_restore_sig, EINVAL");
 				return -EINVAL;
+			}
 		} else {
 			/* Mask invalid bits out for historical reasons (broken hardware). */
 			fpu->state.fxsave.mxcsr &= mxcsr_feature_mask;
@@ -410,8 +424,12 @@ static int __fpu_restore_sig(void __user *buf, void __user *buf_fx,
 
 		fpu->state.xsave.header.xfeatures &= mask;
 		ret = os_xrstor_safe(&fpu->state.xsave, xfeatures_mask_all);
+		if (ret)
+			pr_info("IBT.__fpu_restore_sig, os_xrstor_safe, ret:%d\n",ret);
 	} else {
 		ret = fxrstor_safe(&fpu->state.fxsave);
+		if (ret)
+			pr_info("IBT.__fpu_restore_sig, fxrstor_safe, ret:%d\n",ret);
 	}
 
 	if (likely(!ret))
@@ -466,11 +484,15 @@ int fpu__restore_sig(void __user *buf, int ia32_frame)
 				      NULL, buf);
 	} else {
 		ret = __fpu_restore_sig(buf, buf_fx, ia32_fxstate);
+		pr_info("IBT.fpu__restore_sig s: %d\n", ret);
 	}
 
 out:
 	if (unlikely(ret))
+	{	
+		pr_info("IBT.fpu__restore_sig, ret is %d\n",ret);
 		fpu__clear_user_states(fpu);
+	}
 	return ret;
 }
 
