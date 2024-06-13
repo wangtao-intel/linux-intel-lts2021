@@ -187,6 +187,7 @@ static void early_init_intel(struct cpuinfo_x86 *c)
 	
 	pr_info("IBT.early_init_intel, clear three CPU feature flags");
 	setup_clear_cpu_cap(X86_FEATURE_XSAVEC);
+	setup_clear_cpu_cap(X86_FEATURE_XSAVE);
 	setup_clear_cpu_cap(X86_FEATURE_XSAVEOPT);
 	setup_clear_cpu_cap(X86_FEATURE_PKU);
 	pr_info("IBT.early_init_intel, clear three CPU feature flags Done");
