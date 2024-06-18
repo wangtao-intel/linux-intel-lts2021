@@ -37,8 +37,10 @@ static inline int check_xstate_in_sigframe(struct fxregs_state __user *fxbuf,
 	if (fx_sw->magic1 != FP_XSTATE_MAGIC1 ||
 	    fx_sw->xstate_size < min_xstate_size ||
 	    fx_sw->xstate_size > fpu_user_xstate_size ||
-	    fx_sw->xstate_size > fx_sw->extended_size)
+	    fx_sw->xstate_size > fx_sw->extended_size){
+		printk_ratelimited(KERN_ERR "IBT.check_xstate_in_sigframe, goto setfx directly, process is %s, pid is %i\n",current->comm, current->pid);
 		goto setfx;
+	}
 
 	/*
 	 * Check for the presence of second magic word at the end of memory

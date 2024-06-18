@@ -363,10 +363,37 @@ static inline int xrstor_from_user_sigframe(struct xregs_state __user *buf, u64 
 	u32 lmask = mask;
 	u32 hmask = mask >> 32;
 	int err;
+	struct fxregs_state *fxstate = xstate->i387;
+	struct xstate_header *xheader = xstate->header;
+	
 
 	stac();
 	XSTATE_OP(XRSTOR, xstate, lmask, hmask, err);
 	clac();
+
+	if(err){
+		//struct fpstate *fpstate = current->thread.fpu.fpstate;
+		//pr_info("IBT.xrstor_from_user_sigframe, size: %u, user_size: %u, xfeatures: %llu, user_xfeatures: %llu, xfd: %llu, is_valloc: %u, is_guest: %u, is_confidential: %u, in_use: %u\n", 
+		//		fpstate->size,fpstate->user_size,fpstate->xfeatures,fpstate->user_xfeatures,fpstate->xfd,fpstate->is_valloc,fpstate->is_guest,fpstate->is_confidential,fpstate->in_use);
+		pr_info("IBT.xrstor_from_user_sigframe.cwd: 0x%04x\n"
+       			"swd: 0x%04x\n"
+       			"twd: 0x%04x\n"
+       			"fop: 0x%04x\n"
+		        "rip: 0x%016llx\n"
+		        "rdp: 0x%016llx\n"
+		        "fip: 0x%08x\n"
+		        "fcs: 0x%08x\n"
+		        "foo: 0x%08x\n"
+		        "fos: 0x%08x\n"
+		        "mxcsr: 0x%08x\n"
+		        "mxcsr_mask: 0x%08x\n",
+	       fxstate->cwd, fxstate->swd, fxstate->twd, fxstate->fop,
+	       fxstate->rip, fxstate->rdp, fxstate->fip, fxstate->fcs,
+	       fxstate->foo, fxstate->fos, fxstate->mxcsr, fxstate->mxcsr_mask);
+
+	       pr_info("IBT.xfeatures: 0x%016llx\n, xcomp_bv: 0x%016llx\n",xheader->xfeatures, xheader->xcomp_bv);
+	       pr_info("IBT.xrstor_from_user_sigframe, lmask: 0x%08x, hmask: 0x%0x8\n",lmask, hmask);
+	}
 
 	return err;
 }
