@@ -363,8 +363,8 @@ static inline int xrstor_from_user_sigframe(struct xregs_state __user *buf, u64 
 	u32 lmask = mask;
 	u32 hmask = mask >> 32;
 	int err;
-	struct fxregs_state *fxstate = xstate->i387;
-	struct xstate_header *xheader = xstate->header;
+	struct fxregs_state *fxstate = &xstate->i387;
+	struct xstate_header *xheader = &xstate->header;
 	
 
 	stac();
