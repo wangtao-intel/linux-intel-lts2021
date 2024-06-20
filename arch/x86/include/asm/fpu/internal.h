@@ -15,6 +15,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
+#include <linux/uaccess.h>
 
 #include <asm/user.h>
 #include <asm/fpu/api.h>
@@ -363,9 +364,14 @@ static inline int xrstor_from_user_sigframe(struct xregs_state __user *buf, u64 
 	u32 lmask = mask;
 	u32 hmask = mask >> 32;
 	int err;
-	struct fxregs_state *fxstate = xstate->i387;
-	struct xstate_header *xheader = xstate->header;
-	
+	struct xregs_state kxstate;
+	if(copy_from_user(&kxstate, buf, sizeof(struct xregs_state)))
+	{
+		pr_info("IBT.xrstor_from_user_sigframe, copy_from_user fail\n");
+		return -EFAULT;
+	}
+	struct fxregs_state *fxstate = &kxstate.i387;
+        struct xstate_header *xheader = &kxstate.header;
 
 	stac();
 	XSTATE_OP(XRSTOR, xstate, lmask, hmask, err);
